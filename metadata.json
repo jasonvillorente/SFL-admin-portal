@@ -1,0 +1,6 @@
+{
+  "name": "SafeRoute Lite Admin Portal",
+  "description": "barangay safety operations dashboard for monitoring community safety and hazard management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

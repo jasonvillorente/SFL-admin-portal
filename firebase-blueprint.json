@@ -1,0 +1,107 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile containing roles and status.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["resident", "admin"] },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "email", "role", "active"]
+    },
+    "DangerZone": {
+      "title": "Danger Zone",
+      "description": "A verified hazard or high-risk location.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "locationName": { "type": "string" },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "category": { "type": "string" },
+        "riskLevel": { "type": "string" },
+        "description": { "type": "string" },
+        "dateReported": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["locationName", "latitude", "longitude", "category", "riskLevel", "status"]
+    },
+    "IncidentReport": {
+      "title": "Incident Report",
+      "description": "Safety report or incident submitted by residents.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "reporter": { "type": "string" },
+        "reporterEmail": { "type": "string" },
+        "locationName": { "type": "string" },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "dateSubmitted": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "convertedToDangerZoneId": { "type": "string" }
+      },
+      "required": ["reporter", "locationName", "latitude", "longitude", "category", "status"]
+    },
+    "CommunityAlert": {
+      "title": "Community Alert",
+      "description": "Safety announcement sent strictly by admins.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "priorityLevel": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+        "targetArea": { "type": "string" },
+        "dateSent": { "type": "string", "format": "date-time" },
+        "alertType": { "type": "string", "enum": ["Safety Advisory", "Weather Warning", "Road Closure", "Emergency Notice"] }
+      },
+      "required": ["title", "message", "priorityLevel", "targetArea", "alertType"]
+    },
+    "ActivityLog": {
+      "title": "Activity Log",
+      "description": "Audit trail logging administrator actions.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "adminName": { "type": "string" },
+        "adminEmail": { "type": "string" },
+        "action": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "details": { "type": "string" }
+      },
+      "required": ["adminName", "adminEmail", "action", "timestamp"]
+    }
+  },
+  "firestore": {
+    "users": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profile registrations"
+    },
+    "danger_zones": {
+      "schema": { "$ref": "#/entities/DangerZone" },
+      "description": "Locations pinned as hazardous for community awareness"
+    },
+    "incident_reports": {
+      "schema": { "$ref": "#/entities/IncidentReport" },
+      "description": "Safety incidents submitted to barangay officials"
+    },
+    "community_alerts": {
+      "schema": { "$ref": "#/entities/CommunityAlert" },
+      "description": "Broadcasts and emergency alerts sent by admins"
+    },
+    "activity_logs": {
+      "schema": { "$ref": "#/entities/ActivityLog" },
+      "description": "Relational logger tracing admin changes"
+    }
+  }
+}

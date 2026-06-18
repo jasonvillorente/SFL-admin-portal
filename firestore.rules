@@ -1,0 +1,186 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Def-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Global Helper Functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return request.auth != null && (
+        request.auth.token.email == "jasonnnnn001@gmail.com" ||
+        request.auth.token.email == "admin@palanan.gov.ph" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin")
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 3. Entity Specific Validations
+    function isValidUser(data) {
+      return data.uid is string && 
+             data.uid.size() > 0 && 
+             data.uid.size() <= 128 &&
+             data.name is string && 
+             data.name.size() > 0 && 
+             data.name.size() <= 120 &&
+             data.email is string && 
+             data.email.size() > 0 && 
+             data.email.size() <= 150 &&
+             data.role in ['resident', 'admin'] &&
+             data.active is bool;
+    }
+
+    function isValidDangerZone(data) {
+      return data.locationName is string && 
+             data.locationName.size() > 0 && 
+             data.locationName.size() <= 200 &&
+             data.latitude is number &&
+             data.longitude is number &&
+             data.category in ['Crime', 'Poor Lighting', 'Flood Risk', 'Accident-Prone Area', 'Construction Area', 'Suspicious Activity'] &&
+             data.riskLevel in ['Low', 'Moderate', 'High', 'Critical'] &&
+             data.status in ['active', 'inactive'];
+    }
+
+    function isValidIncidentReport(data) {
+      return data.reporter is string && 
+             data.reporter.size() > 0 && 
+             data.reporter.size() <= 100 &&
+             data.locationName is string && 
+             data.locationName.size() > 0 && 
+             data.locationName.size() <= 200 &&
+             data.latitude is number &&
+             data.longitude is number &&
+             data.category in ['Crime', 'Poor Lighting', 'Flood Risk', 'Accident-Prone Area', 'Construction Area', 'Suspicious Activity'] &&
+             data.status in ['pending', 'approved', 'rejected'];
+    }
+
+    function isValidCommunityAlert(data) {
+      return data.title is string && 
+             data.title.size() > 0 && 
+             data.title.size() <= 150 &&
+             data.message is string && 
+             data.message.size() > 0 && 
+             data.message.size() <= 2000 &&
+             data.priorityLevel in ['low', 'medium', 'high', 'critical'] &&
+             data.targetArea is string && 
+             data.targetArea.size() <= 200 &&
+             data.alertType in ['Safety Advisory', 'Weather Warning', 'Road Closure', 'Emergency Notice'];
+    }
+
+    function isValidActivityLog(data) {
+      return data.adminName is string && 
+             data.adminName.size() > 0 && 
+             data.adminName.size() <= 100 &&
+             data.adminEmail is string && 
+             data.adminEmail.size() > 0 && 
+             data.adminEmail.size() <= 150 &&
+             data.action is string && 
+             data.action.size() > 0 && 
+             data.action.size() <= 300;
+    }
+
+    // 4. Collection Mappings
+
+    // Users Collection
+    match /users/{userId} {
+      allow get: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      
+      // Prevent user from setting own role to admin unless writing as existing admin, or bootstrapping
+      allow create: if isSignedIn() && 
+                    isValidId(userId) && 
+                    isValidUser(incoming()) && 
+                    (isOwner(userId) ? (incoming().role == "resident" || request.auth.token.email == "jasonnnnn001@gmail.com" || request.auth.token.email == "admin@palanan.gov.ph") : isAdmin());
+                    
+      allow update: if isSignedIn() && 
+                    isValidId(userId) && 
+                    isValidUser(incoming()) && (
+                      isAdmin() || 
+                      (isOwner(userId) && 
+                       incoming().role == existing().role && 
+                       incoming().active == existing().active &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email']))
+                    );
+      allow delete: if isAdmin();
+    }
+
+    // Auxiliary Mobile App Collections
+    match /residents/{userId} {
+      allow read: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow create, update: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /accounts/{userId} {
+      allow read: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow create, update: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /registeredUsers/{userId} {
+      allow read: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow create, update: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // Danger Zones Collection
+    match /danger_zones/{zoneId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() && isValidId(zoneId) && isValidDangerZone(incoming());
+      allow update: if isAdmin() && isValidId(zoneId) && isValidDangerZone(incoming());
+      allow delete: if isAdmin() && isValidId(zoneId);
+    }
+
+    // Incident Reports Collection
+    match /incident_reports/{reportId} {
+      allow read: if isSignedIn() && (isAdmin() || (resource != null && request.auth != null && resource.data.reporterEmail == request.auth.token.email));
+      allow create: if isSignedIn() && isValidId(reportId) && isValidIncidentReport(incoming()) && incoming().status == "pending";
+      allow update: if isSignedIn() && isValidId(reportId) && (
+        isAdmin() || 
+        (request.auth != null && 
+         existing().reporterEmail == request.auth.token.email && 
+         incoming().status == "pending" && 
+         isValidIncidentReport(incoming()) && 
+         incoming().diff(existing()).affectedKeys().hasOnly(['locationName', 'latitude', 'longitude', 'category', 'description']))
+      );
+      allow delete: if isAdmin() || (isSignedIn() && request.auth != null && existing().reporterEmail == request.auth.token.email && existing().status == "pending");
+    }
+
+    // Community Alerts Collection
+    match /community_alerts/{alertId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() && isValidId(alertId) && isValidCommunityAlert(incoming());
+      allow update: if isAdmin() && isValidId(alertId) && isValidCommunityAlert(incoming());
+      allow delete: if isAdmin() && isValidId(alertId);
+    }
+
+    // Activity Logs Collection (Write-only, immutable audits for administrators)
+    match /activity_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidId(logId) && isValidActivityLog(incoming());
+      allow update, delete: if false; // Logs are perfectly immutable audit trails
+    }
+  }
+}
