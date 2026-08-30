@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { IncidentReport, DangerZone } from '../types';
+import { IncidentReport, UserAccount, getResidentName, formatPhoneNumber, getReportImage, getAllReportImages, resolveLocationName, safeString } from '../types';
 import { 
   Check, 
   X, 
@@ -12,32 +12,51 @@ import {
   Share2, 
   Filter,
   ArrowUpRight,
-  ShieldAlert
+  ShieldAlert,
+  Phone,
+  ShieldCheck,
+  Smartphone,
+  UserCheck,
+  Camera,
+  Image as ImageIcon,
+  Maximize2,
+  ExternalLink,
+  Trash2,
+  Sparkles,
+  RefreshCw,
+  Compass
 } from 'lucide-react';
 import ConfirmDialog from './ConfirmDialog';
 import AlertToast from './AlertToast';
 
 interface IncidentReportsViewProps {
   incidentReports: IncidentReport[];
+  users?: UserAccount[];
   onApproveReport: (id: string) => Promise<void>;
   onRejectReport: (id: string) => Promise<void>;
+  onDeleteReport: (id: string) => Promise<void>;
+  onPurgeTestReports?: (reportIds: string[]) => Promise<void>;
   onConvertToDangerZone: (report: IncidentReport) => void;
 }
 
 export default function IncidentReportsView({
   incidentReports,
+  users = [],
   onApproveReport,
   onRejectReport,
+  onDeleteReport,
+  onPurgeTestReports,
   onConvertToDangerZone
 }: IncidentReportsViewProps) {
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
 
   const [confirmConfig, setConfirmConfig] = useState<{
     title: string;
     message: string;
-    onConfirm: () => void;
+    onConfirm: () => void | Promise<void>;
     isDestructive?: boolean;
   } | null>(null);
 
@@ -45,6 +64,49 @@ export default function IncidentReportsView({
     message: string;
     type: 'success' | 'error' | 'info';
   } | null>(null);
+
+  // Helper to cross-reference and resolve the reporter identity
+  const resolveReporterInfo = (rep: IncidentReport) => {
+    let matchedUser: UserAccount | undefined;
+    if (users && users.length > 0) {
+      matchedUser = users.find(u => {
+        if (rep.userId && (u.uid === rep.userId || u.id === rep.userId)) return true;
+        if (rep.userUid && (u.uid === rep.userUid || u.id === rep.userUid)) return true;
+        if (rep.reporterUid && (u.uid === rep.reporterUid || u.id === rep.reporterUid)) return true;
+        if (rep.reporterEmail && u.email && rep.reporterEmail.toLowerCase() === u.email.toLowerCase()) return true;
+        if (rep.email && u.email && rep.email.toLowerCase() === u.email.toLowerCase()) return true;
+        
+        const rPhone = rep.reporterPhone || rep.phoneNumber || rep.phone || rep.contactNumber;
+        const uPhone = u.phoneNumber || u.phone || u.contactNumber || u.mobile;
+        if (rPhone && uPhone) {
+          const rDigits = String(rPhone).replace(/\D/g, '');
+          const uDigits = String(uPhone).replace(/\D/g, '');
+          if (rDigits && uDigits && (rDigits.endsWith(uDigits.slice(-9)) || uDigits.endsWith(rDigits.slice(-9)))) {
+            return true;
+          }
+        }
+        return false;
+      });
+    }
+
+    // Resolution priority for name
+    const resolvedName = matchedUser ? getResidentName(matchedUser) : getResidentName(rep);
+    const rawPhone = matchedUser?.phoneNumber || matchedUser?.phone || rep.reporterPhone || rep.phoneNumber || rep.phone || rep.contactNumber;
+    const formattedPhone = formatPhoneNumber(rawPhone);
+    const email = matchedUser?.email || rep.reporterEmail || rep.email || '';
+    const isRegistered = Boolean(matchedUser);
+    const isPhoneAuth = Boolean(rawPhone && (!email || matchedUser?.provider === 'phone' || matchedUser?.authType === 'phone'));
+
+    return {
+      name: resolvedName,
+      rawPhone,
+      phone: formattedPhone,
+      email,
+      isRegistered,
+      isPhoneAuth,
+      matchedUser
+    };
+  };
 
   // Counter metrics
   const total = incidentReports.length;
@@ -54,14 +116,29 @@ export default function IncidentReportsView({
 
   // Filter listings
   const filteredReports = incidentReports.filter(rep => {
-    const matchStatus = filterStatus === 'all' || rep.status === filterStatus;
-    const matchSearch = rep.reporter.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                        rep.locationName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                        rep.category.toLowerCase().includes(searchQuery.toLowerCase());
-    return matchStatus && matchSearch;
+    const matchStatus = filterStatus === 'all' || rep?.status === filterStatus;
+    const query = (searchQuery || '').toLowerCase().trim();
+    if (!matchStatus) return false;
+    if (!query) return true;
+
+    const repInfo = resolveReporterInfo(rep);
+    const name = repInfo.name.toLowerCase();
+    const email = repInfo.email.toLowerCase();
+    const phone = repInfo.phone.toLowerCase();
+    const locName = (rep?.locationName || '').toLowerCase();
+    const category = (rep?.category || '').toLowerCase();
+    const desc = (rep?.description || '').toLowerCase();
+
+    return name.includes(query) ||
+           email.includes(query) ||
+           phone.includes(query) ||
+           locName.includes(query) ||
+           category.includes(query) ||
+           desc.includes(query);
   });
 
   const selectedReport = incidentReports.find(r => r.id === selectedReportId);
+  const selectedReporterInfo = selectedReport ? resolveReporterInfo(selectedReport) : null;
 
   const handleApprove = (id: string) => {
     setConfirmConfig({
@@ -77,6 +154,15 @@ export default function IncidentReportsView({
         setConfirmConfig(null);
       }
     });
+  };
+
+  const handleProceedToGeofence = async (report: IncidentReport) => {
+    if (report.status === 'pending') {
+      try {
+        await onApproveReport(report.id);
+      } catch (_) {}
+    }
+    onConvertToDangerZone(report);
   };
 
   const handleReject = (id: string) => {
@@ -96,22 +182,102 @@ export default function IncidentReportsView({
     });
   };
 
+  const handleDelete = (id: string, locationOrName?: string) => {
+    setConfirmConfig({
+      title: "Permanently Delete Report",
+      message: `Are you sure you want to permanently delete this report ${locationOrName ? `("${locationOrName}")` : ''}? This will remove the document from Firestore and cannot be undone.`,
+      isDestructive: true,
+      onConfirm: async () => {
+        try {
+          await onDeleteReport(id);
+          if (selectedReportId === id) {
+            setSelectedReportId(null);
+          }
+          setToastConfig({ message: "Incident report permanently deleted from database.", type: 'success' });
+        } catch (err: any) {
+          setToastConfig({ message: `Failed to delete report: ${err.message}`, type: 'error' });
+        }
+        setConfirmConfig(null);
+      }
+    });
+  };
+
+  const handlePurgeAllTestReports = () => {
+    // Collect test or pending reports, or all reports if requested
+    const testOrPendingReports = incidentReports.filter(r => {
+      if (r.status === 'pending' || r.status === 'rejected') return true;
+      const desc = (r.description || '').toLowerCase();
+      const loc = (r.locationName || '').toLowerCase();
+      const cat = (r.category || '').toLowerCase();
+      return desc.includes('test') || desc.includes('spam') || desc.includes('ouihuihi') ||
+             loc.includes('test') || cat.includes('test') || !desc.trim();
+    });
+
+    const targetIds = testOrPendingReports.length > 0 ? testOrPendingReports.map(r => r.id) : incidentReports.map(r => r.id);
+    const count = targetIds.length;
+
+    if (count === 0) {
+      setToastConfig({ message: "No test or pending incident reports found to purge.", type: 'info' });
+      return;
+    }
+
+    setConfirmConfig({
+      title: "Purge All Test & Pending Reports",
+      message: `Are you sure you want to delete all pending/test incident reports? This will permanently remove ${count} report submission(s) to leave a clean slate.`,
+      isDestructive: true,
+      onConfirm: async () => {
+        try {
+          if (onPurgeTestReports) {
+            await onPurgeTestReports(targetIds);
+          } else {
+            for (const id of targetIds) {
+              await onDeleteReport(id);
+            }
+          }
+          setSelectedReportId(null);
+          setToastConfig({ message: `Successfully purged ${count} test incident reports.`, type: 'success' });
+        } catch (err: any) {
+          setToastConfig({ message: `Purge operation encountered an error: ${err.message}`, type: 'error' });
+        }
+        setConfirmConfig(null);
+      }
+    });
+  };
+
   return (
     <div className="space-y-6" id="incident-reports-layout">
       {/* View Header Row */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-white border border-gray-200 p-4 rounded shadow-sm gap-4">
         <div>
-          <h2 className="text-base font-bold text-slate-900">Resident Incident Reports Registry</h2>
-          <p className="text-xs text-gray-400 mt-0.5">Evaluate, verify, or archive hazard notifications submitted by residents using the Mobile Webapp.</p>
+          <h2 className="text-base font-bold text-slate-900 font-display">Resident Incident Reports Registry</h2>
+          <p className="text-xs text-gray-400 mt-0.5 font-sans">Evaluate, verify, delete spam submissions, or convert verified reports into active geofenced Danger Zones.</p>
+        </div>
+
+        {/* Purge Test Data Top-Level Action */}
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handlePurgeAllTestReports}
+            className="inline-flex items-center space-x-1.5 px-3 py-2 bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 rounded-md text-xs font-bold transition-all shadow-xs cursor-pointer active:scale-95"
+            title="Clean out test and spam report submissions"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-red-600" />
+            <span>🧹 Purge All Test Reports</span>
+            {pending > 0 && (
+              <span className="ml-1 px-1.5 py-0.2 bg-red-200 text-red-800 text-[10px] rounded-full font-mono">
+                {pending}
+              </span>
+            )}
+          </button>
         </div>
       </div>
 
       {/* Summary Indicator Metics Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 font-sans">
         <div className="bg-white border border-gray-200 rounded p-4 shadow-sm text-xs flex items-center justify-between">
           <div>
-            <span className="text-[10px] text-gray-400 font-bold uppercase block">TOTAL SEEDED REPORTS</span>
-            <span className="text-xl font-bold text-slate-900 block mt-1">{total} submitted</span>
+            <span className="text-[10px] text-gray-400 font-bold uppercase block">TOTAL SUBMITTED REPORTS</span>
+            <span className="text-xl font-bold text-slate-900 block mt-1">{total} reports</span>
           </div>
           <div className="p-2 bg-slate-100 rounded text-slate-700">
             <ShieldAlert className="w-5 h-5" />
@@ -155,15 +321,15 @@ export default function IncidentReportsView({
         {/* Reports Grid List (8 columns) */}
         <div className="lg:col-span-8 bg-white border border-gray-200 rounded shadow-sm overflow-hidden flex flex-col">
           {/* Top filtering controller */}
-          <div className="p-4 border-b border-gray-100 bg-slate-50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-xs">
+          <div className="p-4 border-b border-gray-100 bg-slate-50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-xs font-sans">
             {/* Search query box */}
             <div className="relative max-w-xs w-full">
               <input
                 type="text"
-                placeholder="Search reporter, location category..."
+                placeholder="Search reporter, phone, location..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-white border border-gray-300 rounded pl-8 pr-3 py-1.5 focus:outline-[#1E3A5F]"
+                className="w-full bg-white border border-gray-300 rounded pl-8 pr-3 py-1.5 focus:outline-[#1E3A5F] text-xs font-medium"
               />
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
             </div>
@@ -193,83 +359,152 @@ export default function IncidentReportsView({
             </div>
           ) : (
             <div className="overflow-x-auto text-xs">
-              <table className="w-full text-left border-collapse font-sans">
+              <table className="w-full min-w-[860px] text-left border-collapse font-sans">
                 <thead>
-                  <tr className="bg-slate-50 border-b border-gray-200 text-slate-500 text-[10px] font-bold uppercase tracking-widest">
-                    <th className="py-3 px-4">Reporter Details</th>
-                    <th className="py-3 px-4">Location</th>
-                    <th className="py-3 px-4">Classification</th>
-                    <th className="py-3 px-4">Submitted Date</th>
-                    <th className="py-3 px-4">Status</th>
-                    <th className="py-3 px-4 text-right">Evaluation</th>
+                  <tr className="bg-slate-50 border-b border-gray-200 text-slate-500 text-[10px] font-bold uppercase tracking-widest font-display">
+                    <th className="py-3 px-4 min-w-[200px]">Reporter Details</th>
+                    <th className="py-3 px-4 min-w-[70px]">Photo Proof</th>
+                    <th className="py-3 px-4 min-w-[160px]">Location</th>
+                    <th className="py-3 px-4 min-w-[110px]">Classification</th>
+                    <th className="py-3 px-4 min-w-[110px]">Submitted Date</th>
+                    <th className="py-3 px-4 min-w-[90px]">Status</th>
+                    <th className="py-3 px-4 min-w-[150px] text-right">Evaluation & Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 text-slate-700">
-                  {filteredReports.map(rep => (
-                    <tr 
-                      key={rep.id} 
-                      onClick={() => setSelectedReportId(rep.id)}
-                      className={`cursor-pointer transition-colors ${
-                        selectedReportId === rep.id ? 'bg-blue-50/70 font-semibold' : 'hover:bg-slate-50'
-                      }`}
-                    >
-                      <td className="py-3 px-4">
-                        <div className="font-bold text-slate-900">{rep.reporter}</div>
-                        <div className="text-[10px] text-gray-400">{rep.reporterEmail || 'unknown@citizen.org'}</div>
-                      </td>
-                      <td className="py-3 px-4 max-w-xs truncate font-medium">
-                        {rep.locationName}
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="bg-slate-100 text-slate-800 font-medium px-2 py-0.5 rounded text-[10px]">
-                          {rep.category}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-gray-500 font-mono text-[10px]">{rep.dateSubmitted}</td>
-                      <td className="py-3 px-4">
-                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${
-                          rep.status === 'pending' ? 'bg-amber-100 text-amber-800 border border-amber-200' :
-                          rep.status === 'approved' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' :
-                          'bg-red-100 text-red-800 border border-red-250'
-                        }`}>
-                          {rep.status}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right" onClick={(e) => e.stopPropagation()}>
-                        {rep.status === 'pending' ? (
+                  {filteredReports.map(rep => {
+                    const reporterInfo = resolveReporterInfo(rep);
+                    const reportImg = getReportImage(rep);
+                    const isSpamOrTest = (rep.description || '').toLowerCase().includes('test') || 
+                                         (rep.description || '').toLowerCase().includes('ouihuihi') || 
+                                         (rep.locationName || '').toLowerCase().includes('test');
+                    return (
+                      <tr 
+                        key={rep.id} 
+                        onClick={() => setSelectedReportId(rep.id)}
+                        className={`cursor-pointer transition-colors ${
+                          selectedReportId === rep.id ? 'bg-blue-50/70 font-semibold' : 'hover:bg-slate-50'
+                        }`}
+                      >
+                        <td className="py-3 px-4">
+                          <div className="flex items-center space-x-1.5">
+                            <span className="font-bold text-slate-900">{reporterInfo.name}</span>
+                            {reporterInfo.isRegistered && (
+                              <ShieldCheck className="w-3.5 h-3.5 text-blue-600 shrink-0" title="Verified Registered Profile" />
+                            )}
+                          </div>
+
+                          <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
+                            {reporterInfo.phone && (
+                              <span className="inline-flex items-center space-x-1 font-mono text-[10px] text-indigo-700 bg-indigo-50 border border-indigo-200 px-1.5 py-0.2 rounded font-medium">
+                                <Phone className="w-2.5 h-2.5 text-indigo-500 shrink-0" />
+                                <span>{reporterInfo.phone}</span>
+                              </span>
+                            )}
+                            {reporterInfo.email && !reporterInfo.phone && (
+                              <span className="text-[10px] text-gray-400 font-mono">{reporterInfo.email}</span>
+                            )}
+                            {!reporterInfo.email && !reporterInfo.phone && (
+                              <span className="text-[10px] text-gray-400 font-mono italic">Mobile Resident</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4" onClick={(e) => { if (reportImg) { e.stopPropagation(); setPreviewImage(reportImg); } }}>
+                          {reportImg ? (
+                            <div className="relative group w-12 h-12 rounded border border-gray-200 overflow-hidden bg-slate-100 flex items-center justify-center hover:ring-2 hover:ring-indigo-500 transition-all cursor-zoom-in shadow-xs">
+                              <img 
+                                src={reportImg} 
+                                alt="Incident Photo Proof" 
+                                className="w-full h-full object-cover" 
+                                onError={(e) => { 
+                                  const target = e.target as HTMLElement;
+                                  if (target.parentElement) {
+                                    target.parentElement.innerHTML = '<span class="text-[9px] text-gray-400 font-mono italic">Failed to load</span>';
+                                  }
+                                }}
+                              />
+                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-white">
+                                <Maximize2 className="w-4 h-4" />
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="inline-flex items-center space-x-1 text-[10px] font-medium text-slate-500 bg-slate-100 border border-slate-200 px-2 py-1 rounded-full whitespace-nowrap">
+                              <Camera className="w-3 h-3 text-slate-400 shrink-0" />
+                              <span>No photo attached</span>
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 max-w-[200px] truncate font-medium" title={resolveLocationName(rep)}>
+                          {resolveLocationName(rep)}
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <span className="bg-slate-100 text-slate-800 font-medium px-2 py-0.5 rounded text-[10px]">
+                            {rep.category}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-gray-500 font-mono text-[10px] whitespace-nowrap">{rep.dateSubmitted}</td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                            rep.status === 'pending' ? 'bg-amber-100 text-amber-800 border border-amber-200' :
+                            rep.status === 'approved' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' :
+                            'bg-red-100 text-red-800 border border-red-250'
+                          }`}>
+                            {rep.status}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-right" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-end space-x-1.5">
+                            {rep.status === 'pending' && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleApprove(rep.id)}
+                                  className="p-1 px-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded border border-emerald-200 font-bold text-[10px] uppercase transition-colors cursor-pointer"
+                                  title="Verify/Approve Submission"
+                                >
+                                  Approve
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleReject(rep.id)}
+                                  className="p-1 px-1.5 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded border border-amber-200 font-bold text-[10px] uppercase transition-colors cursor-pointer"
+                                  title="Reject Spurious Warning"
+                                >
+                                  Reject
+                                </button>
+                              </>
+                            )}
+
+                            {!rep.convertedToDangerZoneId && (
+                              <button
+                                type="button"
+                                onClick={() => handleProceedToGeofence(rep)}
+                                className="inline-flex items-center space-x-0.5 py-1 px-2 bg-blue-50 border border-blue-200 hover:bg-blue-100 text-[#1E3A5F] rounded font-bold text-[10px] transition-colors cursor-pointer"
+                                title="Go to exact pinpoint on map and configure Danger Zone"
+                              >
+                                <span>Geofence</span>
+                                <ArrowUpRight className="w-3 h-3 text-[#1E3A5F]" />
+                              </button>
+                            )}
+
+                            {rep.convertedToDangerZoneId && (
+                              <span className="text-[10px] text-gray-400 font-medium italic mr-1">Geofenced</span>
+                            )}
+
+                            {/* Quick Delete spam/test button on every row */}
                             <button
-                              onClick={() => handleApprove(rep.id)}
-                              className="p-1 px-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded border border-emerald-200 font-bold text-[10px] uppercase transition-colors"
-                              title="Verify/Approve Submission"
+                              type="button"
+                              onClick={() => handleDelete(rep.id, resolveLocationName(rep))}
+                              className="p-1 px-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded border border-red-200 transition-colors cursor-pointer"
+                              title={isSpamOrTest ? "Delete spam/test report" : "Delete report permanently"}
                             >
-                              Approve
-                            </button>
-                            <button
-                              onClick={() => handleReject(rep.id)}
-                              className="p-1 px-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded border border-red-155 font-bold text-[10px] uppercase transition-colors"
-                              title="Reject Spurious Warning"
-                            >
-                              Reject
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
-                        ) : rep.status === 'approved' && !rep.convertedToDangerZoneId ? (
-                          <button
-                            onClick={() => onConvertToDangerZone(rep)}
-                            className="inline-flex items-center space-x-0.5 py-1 px-2 border border-yellow-300 hover:bg-yellow-50 text-yellow-700 rounded font-semibold text-[10px] transition-colors"
-                            title="Convert Verified Incident to map Danger Zone"
-                          >
-                            <span>Deploy Geofence</span>
-                            <ArrowUpRight className="w-3 h-3" />
-                          </button>
-                        ) : rep.convertedToDangerZoneId ? (
-                          <span className="text-[10px] text-gray-400 font-medium italic">Geofenced Deployment</span>
-                        ) : (
-                          <span className="text-[10px] text-red-500 font-bold">Rejected Archival</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -277,57 +512,152 @@ export default function IncidentReportsView({
         </div>
 
         {/* Evaluation Panel Drawer (4 columns) */}
-        <div className="lg:col-span-4 bg-white border border-gray-200 rounded shadow-sm p-4 flex flex-col justify-start">
-          <h3 className="font-bold text-slate-900 border-b border-gray-100 pb-2 mb-4 flex items-center text-xs tracking-wider uppercase">
+        <div className="lg:col-span-4 bg-white border border-gray-200 rounded shadow-sm p-4 flex flex-col justify-start font-sans">
+          <h3 className="font-bold text-slate-900 border-b border-gray-100 pb-2 mb-4 flex items-center text-xs tracking-wider uppercase font-display">
             <Share2 className="w-4.5 h-4.5 mr-1.5 text-[#1E3A5F]" />
             Incident Review Board
           </h3>
 
-          {!selectedReport ? (
+          {!selectedReport || !selectedReporterInfo ? (
             <div className="my-auto py-12 text-center text-slate-400 text-xs italic">
               Select or click any submitted record on the table to view the detailed citizen dossier.
             </div>
           ) : (
             <div className="space-y-4 text-xs">
               <div className="flex items-center justify-between pb-2 border-b border-gray-150">
-                <span className="text-[9px] font-mono text-slate-400 block uppercase">Report Ref: {selectedReport.id.slice(0, 8)}</span>
+                <span className="text-[9px] font-mono text-slate-400 block uppercase">Report Ref: {selectedReport.id ? selectedReport.id.slice(0, 8) : 'N/A'}</span>
                 <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded uppercase font-bold ${
                   selectedReport.status === 'pending' ? 'bg-amber-100 text-amber-800' :
                   selectedReport.status === 'approved' ? 'bg-emerald-100 text-emerald-800' :
                   'bg-red-100 text-red-800'
                 }`}>
-                  {selectedReport.status.toUpperCase()}
+                  {String(selectedReport.status || '').toUpperCase()}
                 </span>
               </div>
 
-              {/* Citizen Identity */}
+              {/* Citizen Identity Card */}
               <div className="space-y-2.5 p-3 bg-slate-50 border border-gray-200 rounded">
-                <div className="flex items-center space-x-2 text-slate-800 font-bold">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block font-display">Reporter Info</span>
+                
+                <div className="flex items-center space-x-2 text-slate-900 font-bold">
                   <User className="w-4 h-4 text-[#1E3A5F]" />
-                  <span>Reporter: {selectedReport.reporter}</span>
+                  <span>{selectedReporterInfo.name}</span>
+                  {selectedReporterInfo.isRegistered && (
+                    <span className="bg-blue-100 text-blue-800 text-[9px] px-1.5 py-0.2 rounded font-bold uppercase">
+                      Registered Resident
+                    </span>
+                  )}
                 </div>
-                <div className="flex items-center space-x-2 text-gray-500">
-                  <Mail className="w-4 h-4 text-gray-400" />
-                  <span className="font-mono">{selectedReport.reporterEmail || 'anonymous_citizen@gmail.com'}</span>
-                </div>
+
+                {selectedReporterInfo.phone && (
+                  <div className="flex items-center space-x-2 text-indigo-700 bg-indigo-50 border border-indigo-150 px-2 py-1 rounded">
+                    <Phone className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                    <span className="font-mono font-semibold text-[11px]">{selectedReporterInfo.phone}</span>
+                    <span className="text-[9px] text-indigo-500 uppercase font-bold ml-auto">Mobile Auth</span>
+                  </div>
+                )}
+
+                {selectedReporterInfo.email && (
+                  <div className="flex items-center space-x-2 text-gray-600">
+                    <Mail className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                    <span className="font-mono text-[11px] truncate">{selectedReporterInfo.email}</span>
+                  </div>
+                )}
               </div>
 
               {/* Location Specification Coordinates */}
               <div className="space-y-1.5 font-sans">
-                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">Stated Incident Point</span>
-                <p className="font-semibold text-slate-900">{selectedReport.locationName}</p>
-                <div className="flex items-center space-x-1.5 font-mono text-[10px] text-gray-400">
-                  <MapPin className="w-3.5 h-3.5 text-red-500" />
-                  <span>Lat: {selectedReport.latitude.toFixed(5)}, Lng: {selectedReport.longitude.toFixed(5)}</span>
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block font-display">Stated Incident Point</span>
+                <p className="font-semibold text-slate-900">{resolveLocationName(selectedReport)}</p>
+                <div className="flex items-center justify-between font-mono text-[10px] bg-slate-50 p-2 rounded border border-gray-200">
+                  <div className="flex items-center space-x-1.5 text-gray-600">
+                    <MapPin className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                    <span>Lat: {typeof selectedReport.latitude === 'number' && !isNaN(selectedReport.latitude) ? selectedReport.latitude.toFixed(5) : 'N/A'}, Lng: {typeof selectedReport.longitude === 'number' && !isNaN(selectedReport.longitude) ? selectedReport.longitude.toFixed(5) : 'N/A'}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleProceedToGeofence(selectedReport)}
+                    className="inline-flex items-center space-x-1 px-2 py-1 bg-[#1E3A5F] hover:bg-[#132844] text-white rounded font-sans font-bold text-[9px] uppercase tracking-wide transition-colors cursor-pointer shrink-0 shadow-xs"
+                    title="Jump to exact pinpoint on map and configure Danger Zone"
+                  >
+                    <Compass className="w-3 h-3 text-yellow-400" />
+                    <span>Pinpoint on Map</span>
+                  </button>
                 </div>
               </div>
 
               {/* Categorization & User Text Details */}
               <div className="space-y-1.5 font-sans">
-                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">Reporter Description Warning</span>
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block font-display">Reporter Description Warning</span>
                 <div className="p-3 bg-slate-100 rounded text-slate-800 leading-relaxed italic border-l-2 border-[#1E3A5F]">
-                  "{selectedReport.description || 'No descriptive context provided.'}"
+                  "{safeString(selectedReport.description) || 'No descriptive context provided.'}"
                 </div>
+              </div>
+
+              {/* Attached Photo Evidence Section */}
+              <div className="space-y-1.5 font-sans">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block font-display">
+                    Attached Photo Evidence
+                  </span>
+                  {getReportImage(selectedReport) && (
+                    <span className="text-[9px] text-indigo-600 font-bold uppercase bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-100">
+                      {getAllReportImages(selectedReport).length > 1 ? `${getAllReportImages(selectedReport).length} Photos` : 'Photo Verified'}
+                    </span>
+                  )}
+                </div>
+
+                {getReportImage(selectedReport) ? (
+                  <div className="space-y-2">
+                    <div 
+                      onClick={() => setPreviewImage(getReportImage(selectedReport) || null)}
+                      className="relative group rounded border border-gray-200 overflow-hidden bg-slate-900 aspect-video max-h-48 cursor-zoom-in shadow-inner"
+                    >
+                      <img 
+                        src={getReportImage(selectedReport)} 
+                        alt="Citizen Photo Evidence" 
+                        className="w-full h-full object-contain"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-between p-2 text-white">
+                        <span className="text-[10px] font-medium flex items-center space-x-1">
+                          <Maximize2 className="w-3.5 h-3.5" />
+                          <span>Click to Inspect High-Res</span>
+                        </span>
+                        <a 
+                          href={getReportImage(selectedReport)} 
+                          target="_blank" 
+                          rel="noreferrer" 
+                          onClick={(e) => e.stopPropagation()}
+                          className="p-1 bg-white/20 hover:bg-white/40 rounded transition-colors"
+                          title="Open direct file URL"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </a>
+                      </div>
+                    </div>
+
+                    {/* Multi-photo thumbnails if multiple exist */}
+                    {getAllReportImages(selectedReport).length > 1 && (
+                      <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                        {getAllReportImages(selectedReport).map((imgUrl, idx) => (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => setPreviewImage(imgUrl)}
+                            className="w-12 h-12 rounded border border-gray-200 overflow-hidden shrink-0 hover:ring-2 hover:ring-indigo-500 transition-all bg-slate-100 cursor-pointer"
+                          >
+                            <img src={imgUrl} alt={`Attachment ${idx + 1}`} className="w-full h-full object-cover" />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="p-3 bg-slate-50 border border-dashed border-gray-200 rounded text-center text-gray-400">
+                    <Camera className="w-5 h-5 mx-auto mb-1 text-gray-300" />
+                    <p className="text-[11px]">No photographic evidence was attached by the reporter.</p>
+                  </div>
+                )}
               </div>
 
               {/* Subm date */}
@@ -336,53 +666,119 @@ export default function IncidentReportsView({
                 <span>Type: {selectedReport.category}</span>
               </div>
 
-              {/* Evaluation Action Panel buttons */}
-              {selectedReport.status === 'pending' && (
-                <div className="grid grid-cols-2 gap-3 pt-3">
-                  <button
-                    onClick={() => handleApprove(selectedReport.id)}
-                    className="py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold uppercase tracking-wider text-[10px] flex items-center justify-center space-x-1 shadow-sm"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>Approve</span>
-                  </button>
-                  <button
-                    onClick={() => handleReject(selectedReport.id)}
-                    className="py-2.5 px-3 bg-red-600 hover:bg-red-700 text-white rounded font-bold uppercase tracking-wider text-[10px] flex items-center justify-center space-x-1 shadow-sm"
-                  >
-                    <X className="w-4 h-4" />
-                    <span>Reject</span>
-                  </button>
-                </div>
-              )}
+              {/* Evaluation & Deletion Action Panel buttons */}
+              <div className="space-y-2 pt-2 border-t border-gray-100">
+                {selectedReport.status === 'pending' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleApprove(selectedReport.id)}
+                      className="py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold uppercase tracking-wider text-[10px] flex items-center justify-center space-x-1 shadow-sm transition-colors cursor-pointer"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Approve</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleReject(selectedReport.id)}
+                      className="py-2 px-3 bg-amber-600 hover:bg-amber-700 text-white rounded font-bold uppercase tracking-wider text-[10px] flex items-center justify-center space-x-1 shadow-sm transition-colors cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      <span>Reject</span>
+                    </button>
+                  </div>
+                )}
 
-              {selectedReport.status === 'approved' && !selectedReport.convertedToDangerZoneId && (
-                <div className="pt-2">
-                  <button
-                    onClick={() => onConvertToDangerZone(selectedReport)}
-                    className="w-full py-2 px-3 bg-[#1E3A5F] hover:bg-[#152a44] text-white rounded font-bold tracking-wider text-xs flex items-center justify-center space-x-1.5 shadow"
-                  >
-                    <ArrowUpRight className="w-4.5 h-4.5 text-yellow-400" />
-                    <span>PROCEED WITH GEOFENCE DEPLOYMENT</span>
-                  </button>
-                  <p className="text-[10px] text-amber-700 italic mt-1.5 text-center leading-normal">
-                    This will copy coordinates and details onto the Danger Zones setup screen immediately.
-                  </p>
-                </div>
-              )}
+                {/* Primary Proceed to Geofence & Pinpoint Button */}
+                {!selectedReport.convertedToDangerZoneId ? (
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => handleProceedToGeofence(selectedReport)}
+                      className="w-full py-2.5 px-3 bg-[#1E3A5F] hover:bg-[#152a44] text-white rounded font-bold tracking-wider text-xs flex items-center justify-center space-x-1.5 shadow transition-colors cursor-pointer"
+                      title="Navigate to Danger Zone map and center on this exact reported pin point"
+                    >
+                      <MapPin className="w-4 h-4 text-yellow-400" />
+                      <span>PROCEED TO GEOFENCE & PINPOINT</span>
+                      <ArrowUpRight className="w-4 h-4 text-yellow-400" />
+                    </button>
+                    <p className="text-[10px] text-slate-500 italic mt-1 text-center leading-normal font-sans">
+                      Automatically centres map on exact reported GPS coordinates & preloads photos.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="p-2 bg-gray-50 border border-gray-150 rounded text-center text-gray-500 italic text-[11px]">
+                    <span>Verified incident already provisioned into an active hazard geofence.</span>
+                  </div>
+                )}
 
-              {selectedReport.convertedToDangerZoneId && (
-                <div className="p-3 bg-gray-50 border border-gray-150 rounded text-center text-gray-500 italic mt-2">
-                  ✓ Geofence deployment has been executed and linked to Danger Zone ID {selectedReport.convertedToDangerZoneId.slice(0, 8)}.
-                </div>
-              )}
-
+                {/* Permanent Delete Report Button */}
+                <button
+                  type="button"
+                  onClick={() => handleDelete(selectedReport.id, resolveLocationName(selectedReport))}
+                  className="w-full py-2 px-3 bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 rounded font-bold uppercase tracking-wider text-[10px] flex items-center justify-center space-x-1.5 transition-colors cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-red-600" />
+                  <span>Delete Report Permanently</span>
+                </button>
+              </div>
             </div>
           )}
         </div>
 
       </div>
 
+      {/* High-Resolution Photo Evidence Lightbox Modal */}
+      {previewImage && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200"
+          onClick={() => setPreviewImage(null)}
+        >
+          <div 
+            className="relative max-w-4xl w-full bg-slate-900 border border-slate-700 rounded-lg overflow-hidden shadow-2xl flex flex-col max-h-[90vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 bg-slate-800/90 border-b border-slate-700 text-white">
+              <div className="flex items-center space-x-2">
+                <Camera className="w-4 h-4 text-indigo-400" />
+                <span className="text-xs font-bold font-display uppercase tracking-wider">Citizen Evidence Inspection</span>
+              </div>
+              <div className="flex items-center space-x-3">
+                <a 
+                  href={previewImage} 
+                  target="_blank" 
+                  rel="noreferrer" 
+                  className="inline-flex items-center space-x-1 text-[11px] text-slate-300 hover:text-white bg-slate-700/60 px-2 py-1 rounded transition-colors"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span>Open Full File</span>
+                </a>
+                <button
+                  onClick={() => setPreviewImage(null)}
+                  className="p-1 rounded-full text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-black/50">
+              <img 
+                src={previewImage} 
+                alt="Enlarged Citizen Evidence" 
+                className="max-h-[72vh] w-auto max-w-full object-contain rounded shadow-md"
+              />
+            </div>
+
+            <div className="px-4 py-2 bg-slate-800/80 border-t border-slate-700 text-[11px] text-slate-400 flex items-center justify-between">
+              <span>Press anywhere outside or the close icon to dismiss.</span>
+              <span className="font-mono text-[10px] text-slate-500 truncate max-w-md">{previewImage}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation modal */}
       <ConfirmDialog
         isOpen={confirmConfig !== null}
         title={confirmConfig?.title || ""}
@@ -394,13 +790,13 @@ export default function IncidentReportsView({
         isDestructive={confirmConfig?.isDestructive}
       />
 
+      {/* Alert toast */}
       <AlertToast
         isOpen={toastConfig !== null}
         message={toastConfig?.message || ""}
         type={toastConfig?.type}
         onClose={() => setToastConfig(null)}
       />
-
     </div>
   );
 }

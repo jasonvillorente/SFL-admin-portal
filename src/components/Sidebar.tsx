@@ -19,6 +19,12 @@ interface SidebarProps {
   adminName: string;
   adminEmail: string;
   onLogout: () => void;
+  counts?: {
+    pendingReports?: number;
+    totalReports?: number;
+    activeZones?: number;
+    totalUsers?: number;
+  };
 }
 
 export default function Sidebar({ 
@@ -26,14 +32,33 @@ export default function Sidebar({
   onViewChange, 
   adminName, 
   adminEmail, 
-  onLogout 
+  onLogout,
+  counts
 }: SidebarProps) {
   
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'users', label: 'Users', icon: Users },
-    { id: 'danger', label: 'Danger Zones', icon: AlertTriangle },
-    { id: 'reports', label: 'Incident Reports', icon: FileText },
+    { 
+      id: 'users', 
+      label: 'Users', 
+      icon: Users,
+      badge: counts?.totalUsers !== undefined && counts.totalUsers > 0 ? String(counts.totalUsers) : undefined,
+      badgeColor: 'bg-blue-800 text-blue-200'
+    },
+    { 
+      id: 'danger', 
+      label: 'Danger Zones', 
+      icon: AlertTriangle,
+      badge: counts?.activeZones !== undefined && counts.activeZones > 0 ? String(counts.activeZones) : undefined,
+      badgeColor: 'bg-amber-800/80 text-amber-200'
+    },
+    { 
+      id: 'reports', 
+      label: 'Incident Reports', 
+      icon: FileText,
+      badge: counts?.pendingReports !== undefined && counts.pendingReports > 0 ? `${counts.pendingReports} pending` : undefined,
+      badgeColor: 'bg-amber-500 text-slate-900 font-bold'
+    },
     { id: 'logs', label: 'Activity Logs', icon: History },
     { id: 'settings', label: 'Database Settings', icon: Settings }
   ];
@@ -70,7 +95,12 @@ export default function Sidebar({
                 <span className="absolute left-0 top-1/4 bottom-1/4 w-1 bg-white rounded-r" />
               )}
               <Icon className={`w-4 h-4 shrink-0 transition-transform ${isActive ? 'scale-110 text-white' : 'text-slate-400 group-hover:text-white'}`} />
-              <span className="truncate">{item.label}</span>
+              <span className="truncate flex-1 text-left">{item.label}</span>
+              {item.badge && (
+                <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-mono font-bold leading-none ${item.badgeColor || 'bg-slate-700 text-slate-200'}`}>
+                  {item.badge}
+                </span>
+              )}
             </button>
           );
         })}

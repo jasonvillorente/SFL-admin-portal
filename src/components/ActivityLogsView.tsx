@@ -30,10 +30,16 @@ export default function ActivityLogsView({
   } | null>(null);
 
   const filteredLogs = logs.filter(log => {
-    return log.adminName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-           log.adminEmail.toLowerCase().includes(searchQuery.toLowerCase()) ||
-           log.action.toLowerCase().includes(searchQuery.toLowerCase()) ||
-           (log.details && log.details.toLowerCase().includes(searchQuery.toLowerCase()));
+    const query = (searchQuery || '').toLowerCase();
+    if (!query) return true;
+    const adminName = (log?.adminName || '').toLowerCase();
+    const adminEmail = (log?.adminEmail || '').toLowerCase();
+    const action = (log?.action || '').toLowerCase();
+    const details = (log?.details || '').toLowerCase();
+    return adminName.includes(query) ||
+           adminEmail.includes(query) ||
+           action.includes(query) ||
+           details.includes(query);
   });
 
   const handleExportCSV = () => {
@@ -43,8 +49,8 @@ export default function ActivityLogsView({
     });
   };
 
-  const getLogTypeColor = (action: string) => {
-    const act = action.toLowerCase();
+  const getLogTypeColor = (action?: string) => {
+    const act = (action || '').toLowerCase();
     if (act.includes('delete') || act.includes('deactivate') || act.includes('reject')) return 'border-red-500 text-red-700 bg-red-50';
     if (act.includes('add') || act.includes('create') || act.includes('publish') || act.includes('broadcast')) return 'border-emerald-500 text-emerald-700 bg-emerald-50';
     if (act.includes('update') || act.includes('edit') || act.includes('approved')) return 'border-amber-500 text-amber-700 bg-amber-50';

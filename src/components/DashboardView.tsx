@@ -220,7 +220,7 @@ export default function DashboardView({
                       <p className="font-semibold text-slate-900 truncate">{log.action}</p>
                       <p className="text-[10px] text-gray-500 truncate">Agent: {log.adminName} ({log.adminEmail})</p>
                       <span className="text-[9px] text-gray-400 font-mono block mt-1">
-                        {log.timestamp?.toDate ? log.timestamp.toDate().toLocaleString() : new Date(log.timestamp).toLocaleString()}
+                        {log.timestamp?.toDate ? log.timestamp.toDate().toLocaleString() : (log.timestamp ? new Date(log.timestamp).toLocaleString() : 'Just now')}
                       </span>
                     </div>
                   </div>

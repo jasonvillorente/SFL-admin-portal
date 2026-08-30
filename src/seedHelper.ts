@@ -9,7 +9,9 @@ export async function seedDemoData() {
     {
       uid: 'jason_boostrapper_uid',
       name: 'Jason Operative Developer',
+      displayName: 'Jason Operative Developer',
       email: 'jasonnnnn001@gmail.com',
+      phoneNumber: '+639175550100',
       role: 'admin',
       active: true,
       createdAt: new Date().toLocaleDateString()
@@ -17,15 +19,19 @@ export async function seedDemoData() {
     {
       uid: 'demo_admin_palanan',
       name: 'Hon. Maria Santos',
+      displayName: 'Hon. Maria Santos',
       email: 'admin@palanan.gov.ph',
+      phoneNumber: '+639185550200',
       role: 'admin',
       active: true,
       createdAt: new Date().toLocaleDateString()
     },
     {
       uid: 'resident_maria_cruz',
-      name: 'Maria Cruz (Resident)',
+      name: 'Maria Cruz',
+      displayName: 'Maria Cruz',
       email: 'maria.cruz@yahoo.com',
+      phoneNumber: '+639209876543',
       role: 'resident',
       active: true,
       createdAt: new Date().toLocaleDateString()
@@ -33,9 +39,23 @@ export async function seedDemoData() {
     {
       uid: 'resident_juan_dela_cruz',
       name: 'Juan Dela Cruz',
+      displayName: 'Juan Dela Cruz',
       email: 'juan.delacruz@gmail.com',
+      phoneNumber: '+639171234567',
       role: 'resident',
       active: true,
+      createdAt: new Date().toLocaleDateString()
+    },
+    {
+      uid: 'resident_elena_phone_auth',
+      name: 'Elena Garcia',
+      displayName: 'Elena Garcia',
+      fullName: 'Elena Garcia',
+      phoneNumber: '+639274567890',
+      role: 'resident',
+      active: true,
+      authType: 'phone',
+      provider: 'phone',
       createdAt: new Date().toLocaleDateString()
     }
   ];
@@ -134,7 +154,10 @@ export async function seedDemoData() {
     {
       id: 'report_incident_p01',
       reporter: 'Pedro Penduko',
+      reporterName: 'Pedro Penduko',
       reporterEmail: 'pedro@gmail.com',
+      reporterPhone: '+639191234567',
+      phoneNumber: '+639191234567',
       locationName: 'Casino Street dark corridor near Taft',
       latitude: 14.5575,
       longitude: 120.9968,
@@ -146,6 +169,7 @@ export async function seedDemoData() {
     {
       id: 'report_incident_p02',
       reporter: 'Alma Moreno',
+      reporterName: 'Alma Moreno',
       reporterEmail: 'alma@gmail.com',
       locationName: 'Bautista Street corner Palanan Street',
       latitude: 14.5601,
@@ -158,8 +182,12 @@ export async function seedDemoData() {
     },
     {
       id: 'report_incident_p03',
-      reporter: 'Cardo Dalisay',
-      reporterEmail: 'cardo@gmail.com',
+      reporter: 'Elena Garcia',
+      reporterName: 'Elena Garcia',
+      displayName: 'Elena Garcia',
+      phoneNumber: '+639274567890',
+      reporterPhone: '+639274567890',
+      userId: 'resident_elena_phone_auth',
       locationName: 'Zobel Roxas Street border intersection',
       latitude: 14.5629,
       longitude: 121.0035,

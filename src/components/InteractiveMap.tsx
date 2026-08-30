@@ -1,7 +1,7 @@
 import React, { useRef, useEffect } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { DangerZone, IncidentReport } from '../types';
+import { DangerZone, IncidentReport, getResidentName, formatPhoneNumber, resolveLocationName, safeString } from '../types';
 import { Compass } from 'lucide-react';
 
 interface InteractiveMapProps {
@@ -73,6 +73,14 @@ export default function InteractiveMap({
   const creationMarkerRef = useRef<L.Marker | null>(null);
   const creationCircleRef = useRef<L.Circle | null>(null);
 
+  // Helper function to check if coordinate pair is valid
+  const isValidCoord = (lat: any, lng: any): boolean => {
+    const nLat = Number(lat);
+    const nLng = Number(lng);
+    return lat !== null && lat !== undefined && lng !== null && lng !== undefined &&
+      !isNaN(nLat) && !isNaN(nLng) && isFinite(nLat) && isFinite(nLng);
+  };
+
   // 1. Initialize Map once on mount
   useEffect(() => {
     if (!mapContainerRef.current || mapInstance.current) return;
@@ -107,7 +115,7 @@ export default function InteractiveMap({
 
     // User click handler on map triggers location placement back to parent state
     map.on('click', (e: L.LeafletMouseEvent) => {
-      if (onMapClick) {
+      if (onMapClick && e?.latlng && isValidCoord(e.latlng.lat, e.latlng.lng)) {
         onMapClick(e.latlng.lat, e.latlng.lng);
       }
     });
@@ -144,7 +152,10 @@ export default function InteractiveMap({
       creationCircleRef.current = null;
     }
 
-    if (isCreating && createLat !== null && createLng !== null) {
+    if (isCreating && isValidCoord(createLat, createLng)) {
+      const lat = Number(createLat);
+      const lng = Number(createLng);
+
       // Create a nice draggable marker
       const dragIcon = L.divIcon({
         html: `<div class="flex items-center justify-center w-8 h-8 rounded-full bg-[#1E3A5F] ring-4 ring-[#1E3A5F]/30 text-white border-2 border-white shadow-xl">
@@ -158,14 +169,14 @@ export default function InteractiveMap({
         iconAnchor: [16, 32]
       });
 
-      const marker = L.marker([createLat, createLng], {
+      const marker = L.marker([lat, lng], {
         icon: dragIcon,
         draggable: true
       }).addTo(map);
 
       marker.on('dragend', (e) => {
         const newLatLng = e.target.getLatLng();
-        if (onMarkerDrag) {
+        if (onMarkerDrag && newLatLng && isValidCoord(newLatLng.lat, newLatLng.lng)) {
           onMarkerDrag(newLatLng.lat, newLatLng.lng);
         }
       });
@@ -174,8 +185,8 @@ export default function InteractiveMap({
 
       // Create the live preview circle around it with custom values
       const circleHexColor = createColor || '#EF4444';
-      const circle = L.circle([createLat, createLng], {
-        radius: createRadius || 100,
+      const circle = L.circle([lat, lng], {
+        radius: Number(createRadius) || 100,
         color: circleHexColor,
         fillColor: circleHexColor,
         weight: 3,
@@ -185,6 +196,9 @@ export default function InteractiveMap({
       }).addTo(map);
 
       creationCircleRef.current = circle;
+
+      // Pan & center map view directly to the exact pinpoint coordinates
+      map.setView([lat, lng], Math.max(map.getZoom(), 17), { animate: true });
     }
   }, [isCreating, createLat, createLng, createRadius, createColor, onMarkerDrag]);
 
@@ -206,14 +220,21 @@ export default function InteractiveMap({
       : dangerZones.filter(z => z.status === 'active' && z.category === selectedCategory);
 
     activeZones.forEach(zone => {
+      if (!isValidCoord(zone.latitude, zone.longitude)) {
+        console.warn('Skipping danger zone with invalid coordinates:', zone);
+        return;
+      }
+
+      const lat = Number(zone.latitude);
+      const lng = Number(zone.longitude);
       const isSelected = selectedMarker?.type === 'zone' && selectedMarker?.id === zone.id;
 
       // Extract colors & radii according to database values, falling back to risk level configurations
       const hexColor = zone.color || MAP_RISK_COLORS[zone.riskLevel] || '#EAB308';
-      const radiusMeters = zone.radius || MAP_RISK_RADII[zone.riskLevel] || 100;
+      const radiusMeters = Number(zone.radius) || MAP_RISK_RADII[zone.riskLevel] || 100;
 
       // Create Leaflet Circle for hazard area (Danger zones must NOT use random markers)
-      const circle = L.circle([zone.latitude, zone.longitude], {
+      const circle = L.circle([lat, lng], {
         radius: radiusMeters,
         color: hexColor,
         fillColor: hexColor,
@@ -232,22 +253,23 @@ export default function InteractiveMap({
 
       // Custom high fidelity HTML popup details template as specified
       const dateString = zone.createdAt ? new Date(zone.createdAt).toLocaleDateString() : 'N/A';
-      const createdByString = zone.createdBy || 'System Administrator';
+      const createdByString = safeString(zone.createdBy) || 'System Administrator';
+      const resolvedLocName = resolveLocationName(zone);
 
       const popupHtml = `
         <div class="p-2.5 max-w-xs text-xs font-sans" id="popup-zone-${zone.id}">
           <div class="flex items-center space-x-1.5 font-bold border-b border-gray-100 pb-1.5 mb-1.5">
             <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: ${hexColor}"></span>
-            <h4 class="font-bold text-slate-900 text-xs leading-snug">${zone.locationName}</h4>
+            <h4 class="font-bold text-slate-900 text-xs leading-snug">${resolvedLocName}</h4>
           </div>
           <table class="w-full text-left font-sans text-[11px] space-y-0.5">
             <tr>
               <td class="font-bold text-slate-400 w-16 uppercase text-[9px] tracking-wider">Category:</td>
-              <td class="text-slate-800 font-medium">${zone.category}</td>
+              <td class="text-slate-800 font-medium">${safeString(zone.category)}</td>
             </tr>
             <tr>
               <td class="font-bold text-slate-400 uppercase text-[9px] tracking-wider">Risk Level:</td>
-              <td class="font-semibold" style="color: ${hexColor}">${zone.riskLevel} (${radiusMeters}m Zone)</td>
+              <td class="font-semibold" style="color: ${hexColor}">${safeString(zone.riskLevel)} (${radiusMeters}m Zone)</td>
             </tr>
             <tr>
               <td class="font-bold text-slate-400 uppercase text-[9px] tracking-wider">Created:</td>
@@ -259,7 +281,7 @@ export default function InteractiveMap({
             </tr>
           </table>
           <p class="text-[11px] text-slate-600 bg-slate-50 border border-gray-200 p-2 rounded mt-2 italic max-h-16 overflow-y-auto">
-            "${zone.description || 'No safety remarks registered.'}"
+            "${safeString(zone.description) || 'No safety remarks registered.'}"
           </p>
         </div>
       `;
@@ -275,6 +297,13 @@ export default function InteractiveMap({
         : incidentReports.filter(r => r.category === selectedCategory);
 
       activeReports.forEach(report => {
+        if (!isValidCoord(report.latitude, report.longitude)) {
+          console.warn('Skipping incident report with invalid coordinates:', report);
+          return;
+        }
+
+        const lat = Number(report.latitude);
+        const lng = Number(report.longitude);
         const isSelected = selectedMarker?.type === 'report' && selectedMarker?.id === report.id;
 
         // Leaflet standard marker with nice inline html icon representing report point
@@ -289,7 +318,7 @@ export default function InteractiveMap({
           iconAnchor: [12, 12]
         });
 
-        const marker = L.marker([report.latitude, report.longitude], { icon: customIcon });
+        const marker = L.marker([lat, lng], { icon: customIcon });
 
         marker.on('click', (e) => {
           L.DomEvent.stopPropagation(e);
@@ -298,12 +327,21 @@ export default function InteractiveMap({
           }
         });
 
+        const reporterDisplayName = getResidentName(report, 'Anonymous Citizen');
+        const phone = report.reporterPhone || report.phoneNumber || report.phone;
+        const formattedPhone = formatPhoneNumber(phone);
+        const contactLine = formattedPhone 
+          ? `<div><span class="font-semibold text-slate-500">Contact:</span> <span class="font-mono text-indigo-700">${formattedPhone}</span></div>` 
+          : (report.reporterEmail ? `<div><span class="font-semibold text-slate-500">Email:</span> <span class="font-mono">${report.reporterEmail}</span></div>` : '');
+
         const reportPopup = `
           <div class="p-2 max-w-xs text-xs font-sans">
             <h4 class="font-bold text-indigo-900 border-b pb-1 mb-1 font-display">Citizen Report Pinpoint</h4>
-            <div><span class="font-semibold text-slate-500">Reporter:</span> ${report.reporter}</div>
-            <div><span class="font-semibold text-slate-500">Type:</span> ${report.category}</div>
-            <p class="text-[11px] text-slate-600 bg-slate-50 border p-1 rounded mt-1.5 italic">"${report.description}"</p>
+            <div><span class="font-semibold text-slate-500">Reporter:</span> <strong class="text-slate-800">${reporterDisplayName}</strong></div>
+            ${contactLine}
+            <div><span class="font-semibold text-slate-500">Type:</span> ${safeString(report.category) || 'Incident'}</div>
+            <div><span class="font-semibold text-slate-500">Location:</span> <span class="text-slate-700">${resolveLocationName(report)}</span></div>
+            <p class="text-[11px] text-slate-600 bg-slate-50 border p-1 rounded mt-1.5 italic">"${safeString(report.description) || 'No details provided.'}"</p>
           </div>
         `;
 
@@ -321,14 +359,16 @@ export default function InteractiveMap({
 
     if (selectedMarker.type === 'zone') {
       const zone = dangerZones.find(z => z.id === selectedMarker.id);
-      if (zone) {
-        map.setView([zone.latitude, zone.longitude], 17, { animate: true });
+      if (zone && isValidCoord(zone.latitude, zone.longitude)) {
+        const lat = Number(zone.latitude);
+        const lng = Number(zone.longitude);
+        map.setView([lat, lng], 17, { animate: true });
         
         // Find existing layer to open its popup in real-time
         zonesGroupRef.current?.eachLayer((layer: any) => {
           if (layer instanceof L.Circle) {
             const center = layer.getLatLng();
-            if (Math.abs(center.lat - zone.latitude) < 0.0001 && Math.abs(center.lng - zone.longitude) < 0.0001) {
+            if (center && Math.abs(center.lat - lat) < 0.0001 && Math.abs(center.lng - lng) < 0.0001) {
               layer.openPopup();
             }
           }
@@ -336,8 +376,10 @@ export default function InteractiveMap({
       }
     } else if (selectedMarker.type === 'report') {
       const report = incidentReports.find(r => r.id === selectedMarker.id);
-      if (report) {
-        map.setView([report.latitude, report.longitude], 17, { animate: true });
+      if (report && isValidCoord(report.latitude, report.longitude)) {
+        const lat = Number(report.latitude);
+        const lng = Number(report.longitude);
+        map.setView([lat, lng], 17, { animate: true });
       }
     }
   }, [selectedMarker, dangerZones, incidentReports]);

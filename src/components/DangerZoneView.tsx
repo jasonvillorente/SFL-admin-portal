@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { DangerZone } from '../types';
+import React, { useState, useEffect } from 'react';
+import { DangerZone, getReportImage, getAllReportImages, resolveLocationName, safeString } from '../types';
 import InteractiveMap from './InteractiveMap';
 import { 
   Plus, 
@@ -11,13 +11,20 @@ import {
   AlertTriangle,
   ChevronUp,
   ChevronDown,
-  RotateCcw
+  RotateCcw,
+  Camera,
+  Image as ImageIcon,
+  Maximize2,
+  ExternalLink,
+  Upload
 } from 'lucide-react';
 import ConfirmDialog from './ConfirmDialog';
 import AlertToast from './AlertToast';
 
 interface DangerZoneViewProps {
   dangerZones: DangerZone[];
+  initialPrefill?: Partial<DangerZone> | null;
+  onClearPrefill?: () => void;
   onAddDangerZone: (zone: Omit<DangerZone, 'id'>) => Promise<void>;
   onUpdateDangerZone: (id: string, zone: Partial<DangerZone>) => Promise<void>;
   onDeleteDangerZone: (id: string) => Promise<void>;
@@ -68,12 +75,15 @@ const DANGER_LEVEL_COLORS: Record<'Low' | 'Moderate' | 'High' | 'Critical', { he
 
 export default function DangerZoneView({
   dangerZones,
+  initialPrefill,
+  onClearPrefill,
   onAddDangerZone,
   onUpdateDangerZone,
   onDeleteDangerZone
 }: DangerZoneViewProps) {
   const [isAdding, setIsAdding] = useState(false);
   const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
 
   // Custom modal and toast states
   const [confirmConfig, setConfirmConfig] = useState<{
@@ -96,9 +106,35 @@ export default function DangerZoneView({
   const [riskLevel, setRiskLevel] = useState<typeof RISK_LEVELS[number]>('Moderate');
   const [radius, setRadius] = useState<number>(150);
   const [description, setDescription] = useState('');
+  const [imageUrl, setImageUrl] = useState('');
   const [status, setStatus] = useState<'active' | 'inactive'>('active');
 
   const [formError, setFormError] = useState<string | null>(null);
+
+  // React to initialPrefill from incident reports
+  useEffect(() => {
+    if (initialPrefill) {
+      setIsAdding(true);
+      setEditingZoneId(null);
+      if (initialPrefill.locationName) setLocationName(initialPrefill.locationName);
+      if (initialPrefill.latitude !== undefined && initialPrefill.latitude !== null) {
+        setLatitude(Number(initialPrefill.latitude));
+      }
+      if (initialPrefill.longitude !== undefined && initialPrefill.longitude !== null) {
+        setLongitude(Number(initialPrefill.longitude));
+      }
+      if (initialPrefill.category && CATEGORIES.includes(initialPrefill.category as any)) {
+        setCategory(initialPrefill.category as any);
+      }
+      if (initialPrefill.riskLevel && RISK_LEVELS.includes(initialPrefill.riskLevel as any)) {
+        setRiskLevel(initialPrefill.riskLevel as any);
+      }
+      if (initialPrefill.radius) setRadius(Number(initialPrefill.radius));
+      if (initialPrefill.description) setDescription(initialPrefill.description);
+      const img = initialPrefill.imageUrl || initialPrefill.photoUrl || (initialPrefill.photos && initialPrefill.photos[0]);
+      if (img) setImageUrl(img);
+    }
+  }, [initialPrefill]);
 
   const resetForm = () => {
     setLocationName('');
@@ -108,8 +144,10 @@ export default function DangerZoneView({
     setRiskLevel('Moderate');
     setRadius(150);
     setDescription('');
+    setImageUrl('');
     setStatus('active');
     setFormError(null);
+    onClearPrefill?.();
   };
 
   const handleMapClick = (lat: number, lng: number) => {
@@ -127,8 +165,8 @@ export default function DangerZoneView({
     setEditingZoneId(zone.id);
     setIsAdding(false);
     setLocationName(zone.locationName);
-    setLatitude(zone.latitude);
-    setLongitude(zone.longitude);
+    setLatitude(zone.latitude !== undefined && zone.latitude !== null && !isNaN(Number(zone.latitude)) ? Number(zone.latitude) : null);
+    setLongitude(zone.longitude !== undefined && zone.longitude !== null && !isNaN(Number(zone.longitude)) ? Number(zone.longitude) : null);
     setCategory(zone.category as any);
     
     // Normalize risk level from incoming database format
@@ -142,6 +180,8 @@ export default function DangerZoneView({
     setRiskLevel(legacyLevel);
     setRadius(zone.radius || 150);
     setDescription(zone.description || '');
+    const img = zone.imageUrl || zone.photoUrl || (zone.photos && zone.photos[0]) || '';
+    setImageUrl(img);
     setStatus(zone.status);
     setFormError(null);
   };
@@ -180,6 +220,9 @@ export default function DangerZoneView({
       description: description.trim(),
       radius: Number(radius),
       color: colorConfig.name, // "Green", "Orange", "Red"
+      imageUrl: imageUrl.trim() || undefined,
+      photoUrl: imageUrl.trim() || undefined,
+      photos: imageUrl.trim() ? [imageUrl.trim()] : [],
       createdAt: new Date().toISOString(),
       createdBy: '', // Filled in server or app wrapper session
       status
@@ -502,7 +545,7 @@ export default function DangerZoneView({
 
                   {/* Safety remarks specifications */}
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Avisory Remarks</label>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Advisory Remarks</label>
                     <textarea
                       rows={2}
                       maxLength={180}
@@ -511,6 +554,58 @@ export default function DangerZoneView({
                       onChange={(e) => setDescription(e.target.value)}
                       className="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1 text-xs text-slate-800 placeholder-slate-400 focus:outline-[#1E3A5F] resize-none font-sans"
                     />
+                  </div>
+
+                  {/* Hazard / Incident Photo Evidence */}
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Hazard / Evidence Photo URL
+                    </label>
+                    <div className="flex items-center space-x-2">
+                      <div className="relative flex-1">
+                        <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-gray-400">
+                          <ImageIcon className="w-3.5 h-3.5" />
+                        </div>
+                        <input
+                          type="url"
+                          placeholder="https://... or uploaded image URL"
+                          value={imageUrl}
+                          onChange={(e) => setImageUrl(e.target.value)}
+                          className="w-full bg-slate-50 border border-slate-200 rounded pl-8 pr-3 py-1.5 text-xs text-slate-800 focus:outline-[#1E3A5F] placeholder-slate-400 font-sans"
+                        />
+                      </div>
+                      {imageUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setImageUrl('')}
+                          className="p-1.5 text-slate-400 hover:text-red-500 rounded border border-slate-200 hover:bg-slate-50 transition-colors"
+                          title="Clear image URL"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Image Preview Thumbnail */}
+                    {imageUrl && (
+                      <div className="mt-2 relative group w-full h-20 bg-slate-900 rounded border border-slate-200 overflow-hidden flex items-center justify-center">
+                        <img
+                          src={imageUrl}
+                          alt="Hazard Preview"
+                          className="w-full h-full object-cover"
+                          onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
+                        />
+                        <div 
+                          onClick={() => setPreviewImage(imageUrl)}
+                          className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white cursor-pointer"
+                        >
+                          <span className="text-[10px] font-medium flex items-center space-x-1">
+                            <Maximize2 className="w-3 h-3" />
+                            <span>Inspect</span>
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -561,6 +656,7 @@ export default function DangerZoneView({
               <thead>
                 <tr className="bg-slate-50 border-b border-gray-200 text-slate-600 uppercase tracking-widest font-bold text-[9px]">
                   <th className="py-3 px-4 w-1/3">Geocentered Target Name</th>
+                  <th className="py-3 px-4">Photo / Proof</th>
                   <th className="py-3 px-4">Classification</th>
                   <th className="py-3 px-4">Warning Risk Level</th>
                   <th className="py-3 px-4">Captured Position</th>
@@ -576,11 +672,38 @@ export default function DangerZoneView({
                   else if (levelUpper === 'MEDIUM' || levelUpper === 'MODERATE') mappedColorText = 'ORANGE';
                   else if (levelUpper === 'HIGH' || levelUpper === 'CRITICAL') mappedColorText = 'RED';
 
+                  const zoneImg = getReportImage(zone);
+
                   return (
                     <tr key={zone.id} className="hover:bg-slate-50">
                       <td className="py-3 px-4">
-                        <div className="font-bold text-slate-900">{zone.locationName}</div>
-                        <p className="text-[11px] text-gray-500 line-clamp-1 mt-0.5">{zone.description || 'No safety advisory text is active.'}</p>
+                        <div className="font-bold text-slate-900">{resolveLocationName(zone)}</div>
+                        <p className="text-[11px] text-gray-500 line-clamp-1 mt-0.5">{safeString(zone.description) || 'No safety advisory text is active.'}</p>
+                      </td>
+                      <td className="py-3 px-4" onClick={(e) => { if (zoneImg) { e.stopPropagation(); setPreviewImage(zoneImg); } }}>
+                        {zoneImg ? (
+                          <div className="relative group w-12 h-12 rounded border border-gray-200 overflow-hidden bg-slate-100 flex items-center justify-center hover:ring-2 hover:ring-indigo-500 transition-all cursor-zoom-in shadow-xs">
+                            <img 
+                              src={zoneImg} 
+                              alt="Zone Photo" 
+                              className="w-full h-full object-cover" 
+                              onError={(e) => { 
+                                const target = e.target as HTMLElement;
+                                if (target.parentElement) {
+                                  target.parentElement.innerHTML = '<span class="text-[9px] text-gray-400 font-mono italic">Failed to load</span>';
+                                }
+                              }}
+                            />
+                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-white">
+                              <Maximize2 className="w-4 h-4" />
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="inline-flex items-center space-x-1 text-[10px] font-medium text-slate-500 bg-slate-100 border border-slate-200 px-2 py-1 rounded-full whitespace-nowrap">
+                            <Camera className="w-3 h-3 text-slate-400 shrink-0" />
+                            <span>No photo attached</span>
+                          </span>
+                        )}
                       </td>
                       <td className="py-3 px-4 font-medium text-slate-600">
                         {zone.category}
@@ -591,7 +714,7 @@ export default function DangerZoneView({
                         </span>
                       </td>
                       <td className="py-3 px-4 font-mono text-[10px] text-slate-500">
-                        {zone.latitude.toFixed(5)}, {zone.longitude.toFixed(5)}
+                        {typeof zone.latitude === 'number' && !isNaN(zone.latitude) ? zone.latitude.toFixed(5) : 'N/A'}, {typeof zone.longitude === 'number' && !isNaN(zone.longitude) ? zone.longitude.toFixed(5) : 'N/A'}
                       </td>
                       <td className="py-3 px-4 font-sans">
                         <button
@@ -640,6 +763,56 @@ export default function DangerZoneView({
           </div>
         )}
       </div>
+
+      {/* Lightbox inspection modal */}
+      {previewImage && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200"
+          onClick={() => setPreviewImage(null)}
+        >
+          <div 
+            className="relative max-w-4xl w-full bg-slate-900 border border-slate-700 rounded-lg overflow-hidden shadow-2xl flex flex-col max-h-[90vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 bg-slate-800/90 border-b border-slate-700 text-white">
+              <div className="flex items-center space-x-2">
+                <Camera className="w-4 h-4 text-indigo-400" />
+                <span className="text-xs font-bold font-display uppercase tracking-wider">Hazard Area Photo Evidence</span>
+              </div>
+              <div className="flex items-center space-x-3">
+                <a 
+                  href={previewImage} 
+                  target="_blank" 
+                  rel="noreferrer" 
+                  className="inline-flex items-center space-x-1 text-[11px] text-slate-300 hover:text-white bg-slate-700/60 px-2 py-1 rounded transition-colors"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span>Open Full File</span>
+                </a>
+                <button
+                  onClick={() => setPreviewImage(null)}
+                  className="p-1 rounded-full text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-black/50">
+              <img 
+                src={previewImage} 
+                alt="Enlarged Hazard Photo" 
+                className="max-h-[72vh] w-auto max-w-full object-contain rounded shadow-md"
+              />
+            </div>
+
+            <div className="px-4 py-2 bg-slate-800/80 border-t border-slate-700 text-[11px] text-slate-400 flex items-center justify-between">
+              <span>Press anywhere outside or the close icon to dismiss.</span>
+              <span className="font-mono text-[10px] text-slate-500 truncate max-w-md">{previewImage}</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ConfirmDialog
         isOpen={confirmConfig !== null}
