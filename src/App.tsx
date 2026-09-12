@@ -256,7 +256,14 @@ export default function App() {
     try {
       await signInWithPopup(auth, provider);
     } catch (err: any) {
-      setLoginError(err.message);
+      if (err.code === 'auth/unauthorized-domain' || (err.message && err.message.includes('auth/unauthorized-domain'))) {
+        const currentDomain = window.location.hostname;
+        setLoginError(
+          `Unauthorized Domain (${currentDomain}): To enable Google Sign-In on this domain, open Firebase Console > Authentication > Settings > Authorized domains, and add "${currentDomain}".`
+        );
+      } else {
+        setLoginError(err.message || 'Failed to authenticate with Google.');
+      }
     } finally {
       setLoading(false);
     }
