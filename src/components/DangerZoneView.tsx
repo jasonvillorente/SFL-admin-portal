@@ -8,18 +8,45 @@ import {
   MapPin, 
   Check, 
   X, 
-  AlertTriangle,
-  ChevronUp,
-  ChevronDown,
-  RotateCcw,
-  Camera,
-  Image as ImageIcon,
-  Maximize2,
-  ExternalLink,
-  Upload
+  AlertTriangle, 
+  RotateCcw, 
+  Camera, 
+  Image as ImageIcon, 
+  Maximize2, 
+  Upload, 
+  Clock, 
+  ShieldAlert, 
+  Info,
+  Calendar,
+  Layers,
+  ChevronRight,
+  Filter,
+  CheckCircle2,
+  AlertCircle
 } from 'lucide-react';
 import ConfirmDialog from './ConfirmDialog';
 import AlertToast from './AlertToast';
+import CsvImportModal, { ImportSummaryResult } from './CsvImportModal';
+import { 
+  PALANAN_CENTER, 
+  STUDY_AREA_BOUNDS, 
+  HIGH_INCIDENT_THRESHOLD, 
+  ZONE_COLOR,
+  PRIVACY_DATA_HINT,
+  STANDARD_CATEGORIES,
+  DEFAULT_NIGHT_HOURS,
+  DEFAULT_DAY_HOURS,
+  DEFAULT_ALL_DAY_HOURS
+} from '../utils/zoneConstants';
+import { 
+  isInsideStudyArea, 
+  suggestActiveTime, 
+  getDefaultHoursForActiveTime,
+  parseCrimeTypesString,
+  serializeCrimeTypes,
+  deduplicateDangerZones,
+  hasValidCoordinates
+} from '../utils/zoneUtils';
 
 interface DangerZoneViewProps {
   dangerZones: DangerZone[];
@@ -28,50 +55,15 @@ interface DangerZoneViewProps {
   onAddDangerZone: (zone: Omit<DangerZone, 'id'>) => Promise<void>;
   onUpdateDangerZone: (id: string, zone: Partial<DangerZone>) => Promise<void>;
   onDeleteDangerZone: (id: string) => Promise<void>;
+  onBatchImport?: (
+    toAdd: Omit<DangerZone, 'id'>[],
+    toUpdate: { id: string; changes: Partial<DangerZone> }[],
+    skippedCount: number,
+    batchId?: string,
+    importedAt?: string
+  ) => Promise<ImportSummaryResult>;
+  onUndoBatchImport?: (batchId: string) => Promise<{ deletedCount: number }>;
 }
-
-const CATEGORIES = [
-  'Crime',
-  'Poor Lighting',
-  'Flood Risk',
-  'Accident-Prone Area',
-  'Construction Area',
-  'Suspicious Activity'
-] as const;
-
-const RISK_LEVELS = ['Low', 'Moderate', 'High', 'Critical'] as const;
-
-// Internal mappings for color representation
-const DANGER_LEVEL_COLORS: Record<'Low' | 'Moderate' | 'High' | 'Critical', { hex: string; name: string; bgClass: string; borderClass: string; textClass: string }> = {
-  Low: {
-    hex: '#10B981',
-    name: 'Green',
-    bgClass: 'bg-emerald-50 text-emerald-700',
-    borderClass: 'border-emerald-200',
-    textClass: 'text-emerald-600'
-  },
-  Moderate: {
-    hex: '#F59E0B',
-    name: 'Yellow',
-    bgClass: 'bg-amber-50 text-amber-700',
-    borderClass: 'border-amber-200',
-    textClass: 'text-amber-600'
-  },
-  High: {
-    hex: '#F97316',
-    name: 'Orange',
-    bgClass: 'bg-orange-50 text-orange-700',
-    borderClass: 'border-orange-200',
-    textClass: 'text-orange-600'
-  },
-  Critical: {
-    hex: '#EF4444',
-    name: 'Red',
-    bgClass: 'bg-rose-50 text-rose-700',
-    borderClass: 'border-rose-200',
-    textClass: 'text-rose-600'
-  }
-};
 
 export default function DangerZoneView({
   dangerZones,
@@ -79,13 +71,65 @@ export default function DangerZoneView({
   onClearPrefill,
   onAddDangerZone,
   onUpdateDangerZone,
-  onDeleteDangerZone
+  onDeleteDangerZone,
+  onBatchImport,
+  onUndoBatchImport
 }: DangerZoneViewProps) {
   const [isAdding, setIsAdding] = useState(false);
   const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [isCsvModalOpen, setIsCsvModalOpen] = useState(false);
 
-  // Custom modal and toast states
+  // Strictly deduplicate zones by document ID so registry and maps render exactly one row per document
+  const uniqueDangerZones = React.useMemo(() => {
+    return deduplicateDangerZones(dangerZones);
+  }, [dangerZones]);
+
+  // Track recent import batches
+  const availableBatches = React.useMemo(() => {
+    const map = new Map<string, number>();
+    uniqueDangerZones.forEach(z => {
+      if (z.importBatchId) {
+        map.set(z.importBatchId, (map.get(z.importBatchId) || 0) + 1);
+      }
+    });
+    return Array.from(map.entries()).map(([batchId, count]) => ({ batchId, count }));
+  }, [uniqueDangerZones]);
+
+  const latestBatch = availableBatches[availableBatches.length - 1];
+
+  const handlePromptUndoBatch = (batchId: string, count: number) => {
+    if (!onUndoBatchImport) return;
+    setConfirmConfig({
+      title: 'Undo Bulk CSV Import',
+      message: `Permanently delete all ${count} danger zone records created in import batch "${batchId}"? This cannot be undone.`,
+      isDestructive: true,
+      onConfirm: async () => {
+        try {
+          const res = await onUndoBatchImport(batchId);
+          setToastConfig({
+            message: `Successfully deleted ${res.deletedCount} danger zone records from batch ${batchId}.`,
+            type: 'success'
+          });
+        } catch (err: any) {
+          setToastConfig({
+            message: `Failed to undo import: ${err.message || String(err)}`,
+            type: 'error'
+          });
+        }
+        setConfirmConfig(null);
+      }
+    });
+  };
+
+  // Filter & Search states for the zone table
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterCategory, setFilterCategory] = useState<string>('all');
+  const [filterSource, setFilterSource] = useState<string>('all');
+  const [filterActiveTime, setFilterActiveTime] = useState<string>('all');
+  const [filterNeedsLocationOnly, setFilterNeedsLocationOnly] = useState(false);
+
+  // Modals & Alerts
   const [confirmConfig, setConfirmConfig] = useState<{
     title: string;
     message: string;
@@ -98,24 +142,48 @@ export default function DangerZoneView({
     type: 'success' | 'error' | 'info';
   } | null>(null);
 
-  // Form states
+  // Form states: Group 1 - Location
   const [locationName, setLocationName] = useState('');
   const [latitude, setLatitude] = useState<number | null>(null);
   const [longitude, setLongitude] = useState<number | null>(null);
-  const [category, setCategory] = useState<typeof CATEGORIES[number]>('Crime');
-  const [riskLevel, setRiskLevel] = useState<typeof RISK_LEVELS[number]>('Moderate');
   const [radius, setRadius] = useState<number>(150);
+
+  // Form states: Group 2 - Time & Crime Data
+  const [noSplitMode, setNoSplitMode] = useState(false); // "No day/night split" mode
+  const [nightCrimeCount, setNightCrimeCount] = useState<number>(0);
+  const [dayCrimeCount, setDayCrimeCount] = useState<number>(0);
+  const [directCrimeCount, setDirectCrimeCount] = useState<number>(0); // typed only when noSplitMode is true
+  const [activeTime, setActiveTime] = useState<'night_only' | 'day_only' | 'all_day'>('all_day');
+  const [startHour, setStartHour] = useState<number>(0);
+  const [endHour, setEndHour] = useState<number>(24);
+  const [dataPeriod, setDataPeriod] = useState<string>('Jan 2025 - Sep 2026');
+  const [lastIncidentDate, setLastIncidentDate] = useState<string>('');
+  const [crimeTypeRows, setCrimeTypeRows] = useState<{ type: string; count: number }[]>([
+    { type: 'theft', count: 0 }
+  ]);
+
+  // Form states: Group 3 - Details
+  const [category, setCategory] = useState<string>('Crime');
+  const [source, setSource] = useState<'barangay_data' | 'resident_report' | 'both'>('barangay_data');
   const [description, setDescription] = useState('');
   const [imageUrl, setImageUrl] = useState('');
   const [status, setStatus] = useState<'active' | 'inactive'>('active');
+  const [sourceReportId, setSourceReportId] = useState<string | null>(null);
+  const [needsLocation, setNeedsLocation] = useState(false);
 
   const [formError, setFormError] = useState<string | null>(null);
 
-  // React to initialPrefill from incident reports
+  // Derived crime count
+  const effectiveCrimeCount = noSplitMode 
+    ? Math.max(0, directCrimeCount) 
+    : Math.max(0, nightCrimeCount) + Math.max(0, dayCrimeCount);
+
+  // Sync initialPrefill from incident reports
   useEffect(() => {
     if (initialPrefill) {
       setIsAdding(true);
       setEditingZoneId(null);
+      if (initialPrefill.sourceReportId) setSourceReportId(initialPrefill.sourceReportId);
       if (initialPrefill.locationName) setLocationName(initialPrefill.locationName);
       if (initialPrefill.latitude !== undefined && initialPrefill.latitude !== null) {
         setLatitude(Number(initialPrefill.latitude));
@@ -123,42 +191,118 @@ export default function DangerZoneView({
       if (initialPrefill.longitude !== undefined && initialPrefill.longitude !== null) {
         setLongitude(Number(initialPrefill.longitude));
       }
-      if (initialPrefill.category && CATEGORIES.includes(initialPrefill.category as any)) {
-        setCategory(initialPrefill.category as any);
-      }
-      if (initialPrefill.riskLevel && RISK_LEVELS.includes(initialPrefill.riskLevel as any)) {
-        setRiskLevel(initialPrefill.riskLevel as any);
-      }
+      if (initialPrefill.category) setCategory(initialPrefill.category);
       if (initialPrefill.radius) setRadius(Number(initialPrefill.radius));
       if (initialPrefill.description) setDescription(initialPrefill.description);
       const img = initialPrefill.imageUrl || initialPrefill.photoUrl || (initialPrefill.photos && initialPrefill.photos[0]);
       if (img) setImageUrl(img);
+
+      // Requirement 2: Quick-convert from resident reports: crimeCount 0, no dataPeriod (not 1)
+      setSource('resident_report');
+      setNightCrimeCount(0);
+      setDayCrimeCount(0);
+      setDirectCrimeCount(0);
+      setNoSplitMode(false);
+      setActiveTime('all_day');
+      setStartHour(0);
+      setEndHour(24);
+      setDataPeriod(''); // No dataPeriod for quick-converts
+      setCrimeTypeRows([]);
     }
   }, [initialPrefill]);
 
-  const resetForm = () => {
+  // Auto-suggest activeTime when in split mode and total incidents >= 3
+  const handleCountsChange = (n: number, d: number) => {
+    const validN = Math.max(0, Math.floor(n || 0));
+    const validD = Math.max(0, Math.floor(d || 0));
+    setNightCrimeCount(validN);
+    setDayCrimeCount(validD);
+
+    const suggested = suggestActiveTime(validN, validD);
+    if (suggested) {
+      setActiveTime(suggested);
+      const hrs = getDefaultHoursForActiveTime(suggested);
+      setStartHour(hrs.startHour);
+      setEndHour(hrs.endHour);
+    }
+  };
+
+  const handleActiveTimeChange = (newActiveTime: 'night_only' | 'day_only' | 'all_day') => {
+    setActiveTime(newActiveTime);
+    const hrs = getDefaultHoursForActiveTime(newActiveTime);
+    setStartHour(hrs.startHour);
+    setEndHour(hrs.endHour);
+  };
+
+  const handleToggleNoSplit = (enabled: boolean) => {
+    setNoSplitMode(enabled);
+    if (enabled) {
+      // Lock activeTime to all_day, night/day to 0
+      setActiveTime('all_day');
+      setStartHour(0);
+      setEndHour(24);
+      setNightCrimeCount(0);
+      setDayCrimeCount(0);
+      if (directCrimeCount === 0 && (nightCrimeCount > 0 || dayCrimeCount > 0)) {
+        setDirectCrimeCount(nightCrimeCount + dayCrimeCount);
+      }
+    } else {
+      // Return to split mode
+      setDirectCrimeCount(0);
+      const suggested = suggestActiveTime(nightCrimeCount, dayCrimeCount);
+      const chosen = suggested || 'all_day';
+      setActiveTime(chosen);
+      const hrs = getDefaultHoursForActiveTime(chosen);
+      setStartHour(hrs.startHour);
+      setEndHour(hrs.endHour);
+    }
+  };
+
+  const resetForm = (keepStickyFields = false) => {
     setLocationName('');
     setLatitude(null);
     setLongitude(null);
-    setCategory('Crime');
-    setRiskLevel('Moderate');
     setRadius(150);
     setDescription('');
     setImageUrl('');
     setStatus('active');
+    setSourceReportId(null);
+    setNeedsLocation(false);
+    setNightCrimeCount(0);
+    setDayCrimeCount(0);
+    setDirectCrimeCount(0);
+    setNoSplitMode(false);
+    setActiveTime('all_day');
+    setStartHour(0);
+    setEndHour(24);
+    setLastIncidentDate('');
+    setCrimeTypeRows([{ type: 'theft', count: 0 }]);
+    setCategory('Crime');
     setFormError(null);
-    onClearPrefill?.();
+
+    if (!keepStickyFields) {
+      setSource('barangay_data');
+      setDataPeriod('Jan 2025 - Sep 2026');
+      onClearPrefill?.();
+    }
   };
 
   const handleMapClick = (lat: number, lng: number) => {
     setLatitude(lat);
     setLongitude(lng);
+    setNeedsLocation(false);
     setFormError(null);
   };
 
   const handleMarkerDrag = (lat: number, lng: number) => {
     setLatitude(lat);
     setLongitude(lng);
+    setNeedsLocation(false);
+  };
+
+  const handleRadiusChange = (val: number) => {
+    const freshVal = Math.max(10, Math.min(1000, val));
+    setRadius(freshVal);
   };
 
   const startEdit = (zone: DangerZone) => {
@@ -167,76 +311,180 @@ export default function DangerZoneView({
     setLocationName(zone.locationName);
     setLatitude(zone.latitude !== undefined && zone.latitude !== null && !isNaN(Number(zone.latitude)) ? Number(zone.latitude) : null);
     setLongitude(zone.longitude !== undefined && zone.longitude !== null && !isNaN(Number(zone.longitude)) ? Number(zone.longitude) : null);
-    setCategory(zone.category as any);
-    
-    // Normalize risk level from incoming database format
-    let legacyLevel: typeof RISK_LEVELS[number] = 'Moderate';
-    const rawLevel = String(zone.riskLevel).toLowerCase();
-    if (rawLevel === 'low') legacyLevel = 'Low';
-    else if (rawLevel === 'moderate' || rawLevel === 'medium') legacyLevel = 'Moderate';
-    else if (rawLevel === 'high') legacyLevel = 'High';
-    else if (rawLevel === 'critical') legacyLevel = 'Critical';
-
-    setRiskLevel(legacyLevel);
+    setCategory(zone.category || 'Crime');
     setRadius(zone.radius || 150);
     setDescription(zone.description || '');
     const img = zone.imageUrl || zone.photoUrl || (zone.photos && zone.photos[0]) || '';
     setImageUrl(img);
-    setStatus(zone.status);
+    setStatus(zone.status === 'inactive' ? 'inactive' : 'active');
+    setSource(zone.source || 'barangay_data');
+    setNeedsLocation(zone.needsLocation === true);
+
+    const hasNight = zone.nightCrimeCount !== undefined && zone.nightCrimeCount !== null;
+    const hasDay = zone.dayCrimeCount !== undefined && zone.dayCrimeCount !== null;
+
+    if (!hasNight && !hasDay && zone.crimeCount !== undefined) {
+      setNoSplitMode(true);
+      setDirectCrimeCount(zone.crimeCount);
+      setNightCrimeCount(0);
+      setDayCrimeCount(0);
+      setActiveTime('all_day');
+    } else {
+      setNoSplitMode(false);
+      setNightCrimeCount(Number(zone.nightCrimeCount) || 0);
+      setDayCrimeCount(Number(zone.dayCrimeCount) || 0);
+      setDirectCrimeCount(0);
+      setActiveTime(zone.activeTime || 'all_day');
+    }
+
+    setStartHour(zone.startHour !== undefined ? zone.startHour : (zone.activeTime === 'night_only' ? 18 : (zone.activeTime === 'day_only' ? 5 : 0)));
+    setEndHour(zone.endHour !== undefined ? zone.endHour : (zone.activeTime === 'night_only' ? 5 : (zone.activeTime === 'day_only' ? 18 : 24)));
+    setDataPeriod(zone.dataPeriod || '');
+    setLastIncidentDate(zone.lastIncidentDate || '');
+
+    // Crime types map
+    if (zone.crimeTypes && Object.keys(zone.crimeTypes).length > 0) {
+      setCrimeTypeRows(
+        Object.entries(zone.crimeTypes).map(([type, count]) => ({ type, count }))
+      );
+    } else {
+      setCrimeTypeRows([]);
+    }
+
     setFormError(null);
   };
 
   const cancelAction = () => {
     setIsAdding(false);
     setEditingZoneId(null);
-    resetForm();
+    resetForm(false);
   };
 
-  const handleRadiusChange = (val: number) => {
-    const freshVal = Math.max(10, Math.min(1000, val));
-    setRadius(freshVal);
+  // Add / Remove Crime Type pairs
+  const handleAddCrimeTypeRow = () => {
+    setCrimeTypeRows(prev => [...prev, { type: '', count: 1 }]);
   };
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleRemoveCrimeTypeRow = (idx: number) => {
+    setCrimeTypeRows(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleUpdateCrimeTypeRow = (idx: number, field: 'type' | 'count', val: any) => {
+    setCrimeTypeRows(prev => {
+      const next = [...prev];
+      if (field === 'type') next[idx].type = val;
+      if (field === 'count') next[idx].count = Math.max(0, parseInt(val, 10) || 0);
+      return next;
+    });
+  };
+
+  const validateAndBuildPayload = (): Omit<DangerZone, 'id'> | null => {
+    // 1. Name required
     if (!locationName.trim()) {
-      setFormError('Please yield a descriptive Location Name.');
-      return;
-    }
-    if (latitude === null || longitude === null) {
-      setFormError('Please select or drag a geocentric location directly on the map first.');
-      return;
+      setFormError('Location Name is required.');
+      return null;
     }
 
-    const colorConfig = DANGER_LEVEL_COLORS[riskLevel];
+    // 2. Coordinates validation
+    if (latitude === null || longitude === null || isNaN(latitude) || isNaN(longitude)) {
+      setFormError('Please select coordinates on the map or enter valid Latitude and Longitude.');
+      return null;
+    }
+
+    if (!isInsideStudyArea(latitude, longitude)) {
+      setFormError(
+        `Coordinates (${latitude.toFixed(4)}, ${longitude.toFixed(4)}) fall outside Barangay Palanan study area [Lat ${STUDY_AREA_BOUNDS.minLat} - ${STUDY_AREA_BOUNDS.maxLat}, Lng ${STUDY_AREA_BOUNDS.minLng} - ${STUDY_AREA_BOUNDS.maxLng}].`
+      );
+      return null;
+    }
+
+    // 3. Radius > 0
+    if (!radius || radius <= 0) {
+      setFormError('Radius must be a positive number greater than 0.');
+      return null;
+    }
+
+    // 4. Counts validation (non-negative whole numbers)
+    if (noSplitMode) {
+      if (directCrimeCount < 0 || isNaN(directCrimeCount)) {
+        setFormError('Total crime count must be a non-negative whole number (0 or higher).');
+        return null;
+      }
+    } else {
+      if (nightCrimeCount < 0 || isNaN(nightCrimeCount) || dayCrimeCount < 0 || isNaN(dayCrimeCount)) {
+        setFormError('Night and Day crime counts must be non-negative whole numbers.');
+        return null;
+      }
+    }
+
+    // Crime types dictionary
+    const crimeTypesDict: Record<string, number> = {};
+    crimeTypeRows.forEach(r => {
+      const trimmed = r.type.trim().toLowerCase();
+      if (trimmed && r.count > 0) {
+        crimeTypesDict[trimmed] = (crimeTypesDict[trimmed] || 0) + r.count;
+      }
+    });
 
     const payload: Omit<DangerZone, 'id'> = {
       zoneId: editingZoneId || '',
+      sourceReportId: sourceReportId || undefined,
       locationName: locationName.trim(),
       latitude: Number(latitude),
       longitude: Number(longitude),
-      category,
-      riskLevel,
-      description: description.trim(),
       radius: Number(radius),
-      color: colorConfig.name, // "Green", "Orange", "Red"
+      category,
+      source,
+      activeTime,
+      startHour: Number(startHour),
+      endHour: Number(endHour),
+      nightCrimeCount: noSplitMode ? 0 : Math.max(0, Math.floor(nightCrimeCount)),
+      dayCrimeCount: noSplitMode ? 0 : Math.max(0, Math.floor(dayCrimeCount)),
+      crimeCount: effectiveCrimeCount,
+      crimeTypes: crimeTypesDict,
+      dataPeriod: dataPeriod.trim() || undefined,
+      lastIncidentDate: lastIncidentDate.trim() || undefined,
+      description: description.trim(),
       imageUrl: imageUrl.trim() || undefined,
       photoUrl: imageUrl.trim() || undefined,
       photos: imageUrl.trim() ? [imageUrl.trim()] : [],
-      createdAt: new Date().toISOString(),
-      createdBy: '', // Filled in server or app wrapper session
-      status
+      status,
+      active: status === 'active',
+      needsLocation: false, // Valid coordinates verified
+      updatedAt: new Date().toISOString()
     };
+
+    return payload;
+  };
+
+  const handleSave = async (e: React.FormEvent, addAnother = false) => {
+    e.preventDefault();
+    setFormError(null);
+
+    const payload = validateAndBuildPayload();
+    if (!payload) return;
 
     try {
       if (editingZoneId) {
-        // Exclude original fields that shouldn't be overridden if undefined
-        const { createdAt, ...updatePayload } = payload as any;
-        await onUpdateDangerZone(editingZoneId, updatePayload);
+        await onUpdateDangerZone(editingZoneId, payload);
+        setToastConfig({ message: `Danger zone "${payload.locationName}" successfully updated.`, type: 'success' });
       } else {
         await onAddDangerZone(payload);
+        setToastConfig({ message: `Danger zone "${payload.locationName}" successfully registered.`, type: 'success' });
       }
-      cancelAction();
+
+      if (addAnother) {
+        // "Save and add another" keeps dataPeriod and source
+        const savedPeriod = dataPeriod;
+        const savedSource = source;
+        resetForm(true);
+        setDataPeriod(savedPeriod);
+        setSource(savedSource);
+        setIsAdding(true);
+        setEditingZoneId(null);
+      } else {
+        cancelAction();
+      }
     } catch (err: any) {
       setFormError(err.message || 'Error occurred while saving danger zone.');
     }
@@ -245,7 +493,7 @@ export default function DangerZoneView({
   const handleDelete = (id: string, name: string) => {
     setConfirmConfig({
       title: "Delete Danger Zone",
-      message: `Are you sure you want to permanently delete the "${name}" danger zone? This will immediately remove it from all resident maps.`,
+      message: `Permanently delete "${name}"? This removes the geofence alert from all resident maps immediately.`,
       isDestructive: true,
       onConfirm: async () => {
         try {
@@ -260,10 +508,19 @@ export default function DangerZoneView({
   };
 
   const toggleStatus = (zone: DangerZone) => {
+    // Requirement 5: Block activation for "Needs Location" rows until valid coordinates exist
+    if (zone.needsLocation === true) {
+      setToastConfig({
+        message: 'Activation blocked: This zone needs valid coordinates inside Barangay Palanan before it can be activated.',
+        type: 'error'
+      });
+      return;
+    }
+
     const nextStatus = zone.status === 'active' ? 'inactive' : 'active';
     const confirmMsg = nextStatus === 'inactive' 
-      ? `Deactivate and suspend danger zone warnings for "${zone.locationName}"? Residents will no longer see warnings on this zone.`
-      : `Re-activate danger zone warning geofence for "${zone.locationName}"? All residents will immediately receive alerts.`;
+      ? `Deactivate and suspend warnings for "${zone.locationName}"? Residents will no longer see warnings.`
+      : `Re-activate warning geofence for "${zone.locationName}"? All residents will immediately receive alerts.`;
 
     setConfirmConfig({
       title: nextStatus === 'inactive' ? "Deactivate Danger Zone" : "Activate Danger Zone",
@@ -272,7 +529,7 @@ export default function DangerZoneView({
       onConfirm: async () => {
         try {
           await onUpdateDangerZone(zone.id, { status: nextStatus });
-          setToastConfig({ message: `Zone operational status successfully set to ${nextStatus.toUpperCase()}.`, type: 'success' });
+          setToastConfig({ message: `Zone operational status set to ${nextStatus.toUpperCase()}.`, type: 'success' });
         } catch (err: any) {
           setToastConfig({ message: `Failed to toggle status: ${err.message}`, type: 'error' });
         }
@@ -281,60 +538,128 @@ export default function DangerZoneView({
     });
   };
 
-  // Helper styles for tables
-  const getRiskColorClass = (level: string) => {
-    const norm = String(level).toUpperCase();
-    if (norm === 'LOW' || norm === 'LOW RISK' || norm === 'LOW_RISK') {
-      return 'text-emerald-700 bg-emerald-50 border border-emerald-200';
+  // Filtered table rows - derived strictly from deduplicated zones
+  const filteredZones = uniqueDangerZones.filter(zone => {
+    if (filterNeedsLocationOnly && !zone.needsLocation) return false;
+    if (filterCategory !== 'all' && zone.category !== filterCategory) return false;
+    if (filterSource !== 'all' && zone.source !== filterSource) return false;
+    if (filterActiveTime !== 'all' && zone.activeTime !== filterActiveTime) return false;
+    if (searchTerm.trim()) {
+      const q = searchTerm.toLowerCase();
+      const loc = (zone.locationName || '').toLowerCase();
+      const desc = (zone.description || '').toLowerCase();
+      if (!loc.includes(q) && !desc.includes(q)) return false;
     }
-    if (norm === 'MEDIUM' || norm === 'MODERATE' || norm === 'MEDIUM RISK' || norm === 'MEDIUM_RISK') {
-      return 'text-orange-700 bg-orange-50 border border-orange-200';
-    }
-    return 'text-rose-700 bg-rose-50 border border-rose-200';
-  };
-
-  const selectedColorHex = DANGER_LEVEL_COLORS[riskLevel].hex;
+    return true;
+  });
 
   return (
     <div className="space-y-6" id="danger-zones-view-root">
-      {/* View Header Row */}
+      
+      {/* Toast and Confirmation modals */}
+      {toastConfig && (
+        <AlertToast 
+          isOpen={!!toastConfig}
+          message={toastConfig.message} 
+          type={toastConfig.type} 
+          onClose={() => setToastConfig(null)} 
+        />
+      )}
+
+      {confirmConfig && (
+        <ConfirmDialog
+          isOpen={!!confirmConfig}
+          title={confirmConfig.title}
+          message={confirmConfig.message}
+          isDestructive={confirmConfig.isDestructive}
+          onConfirm={confirmConfig.onConfirm}
+          onCancel={() => setConfirmConfig(null)}
+        />
+      )}
+
+      {/* CSV Import Modal */}
+      {isCsvModalOpen && onBatchImport && (
+        <CsvImportModal
+          isOpen={isCsvModalOpen}
+          onClose={() => setIsCsvModalOpen(false)}
+          existingZones={uniqueDangerZones}
+          onExecuteImport={async (toAdd, toUpdate, skippedCount, batchId, importedAt) => {
+            const res = await onBatchImport(toAdd, toUpdate, skippedCount, batchId, importedAt);
+            return res;
+          }}
+          onUndoImport={onUndoBatchImport}
+        />
+      )}
+
+      {/* View Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-white border border-gray-200 p-4 rounded shadow-sm gap-4">
         <div>
           <h2 className="text-base font-bold text-slate-900 font-display">Danger Zone Management</h2>
-          <p className="text-xs text-gray-400 mt-0.5">Define, edit, and project circular geofenced zones to warning maps of mobile clients in real-time.</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Barangay Palanan crime incidence geofencing, temporal schedules, and rapid bulk import.
+          </p>
         </div>
-        {!isAdding && !editingZoneId && (
-          <button
-            onClick={() => { setIsAdding(true); resetForm(); }}
-            className="px-4 py-2 bg-[#1E3A5F] hover:bg-[#132844] text-white text-xs font-semibold rounded shadow-sm transition-colors flex items-center space-x-1.5 uppercase tracking-wide shrink-0"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add Danger Zone</span>
-          </button>
-        )}
+        
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {onUndoBatchImport && latestBatch && (
+            <button
+              onClick={() => handlePromptUndoBatch(latestBatch.batchId, latestBatch.count)}
+              className="px-3 py-2 bg-rose-50 hover:bg-rose-100 border border-rose-300 text-rose-700 text-xs font-semibold rounded shadow-2xs transition-colors flex items-center space-x-1.5 cursor-pointer"
+              title={`Undo import batch ${latestBatch.batchId} (${latestBatch.count} zones)`}
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-rose-600" />
+              <span>Undo Last Import ({latestBatch.count})</span>
+            </button>
+          )}
+
+          {onBatchImport && (
+            <button
+              onClick={() => setIsCsvModalOpen(true)}
+              className="px-3 py-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 text-xs font-semibold rounded shadow-2xs transition-colors flex items-center space-x-1.5 cursor-pointer"
+            >
+              <Upload className="w-4 h-4 text-slate-600" />
+              <span>Import CSV</span>
+            </button>
+          )}
+
+          {!isAdding && !editingZoneId && (
+            <button
+              onClick={() => { setIsAdding(true); resetForm(false); }}
+              className="px-4 py-2 bg-[#1E3A5F] hover:bg-[#132844] text-white text-xs font-semibold rounded shadow-sm transition-colors flex items-center space-x-1.5 uppercase tracking-wide cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add Danger Zone</span>
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Interactive Geofence Editor */}
+      {/* Data Privacy Hint Reminder */}
+      <div className="bg-amber-50/70 border border-amber-200/80 rounded-md p-3 flex items-start space-x-2.5">
+        <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+        <div className="text-xs text-amber-900">
+          <span className="font-bold">Fast Data Entry Protocol: </span>
+          {PRIVACY_DATA_HINT}
+        </div>
+      </div>
+
+      {/* Interactive Geofence Editor & Form */}
       {(isAdding || editingZoneId) && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6" id="geofence-interactive-editor">
-          {/* Map canvas pane (7 Cols) */}
-          <div className="lg:col-span-7 flex flex-col space-y-4 bg-white border border-gray-200 rounded p-4 shadow-sm h-[520px]">
-            <div className="flex items-center justify-between border-b pb-3 border-slate-100">
+          
+          {/* Map picker pane (5 Cols) */}
+          <div className="lg:col-span-5 flex flex-col space-y-3 bg-white border border-gray-200 rounded p-4 shadow-sm min-h-[500px]">
+            <div className="flex items-center justify-between border-b pb-2.5 border-slate-100">
               <div className="flex items-center space-x-2">
-                <div className="w-6 h-6 rounded-full bg-blue-50 flex items-center justify-center border border-blue-200">
-                  <MapPin className="w-4.5 h-4.5 text-[#1E3A5F]" />
-                </div>
-                <div>
-                  <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide">Interactive Geofence Picker</h4>
-                  <p className="text-[10px] text-gray-400">Click to place marker, drag map PIN to adjust exact geolocational coordinates</p>
-                </div>
+                <MapPin className="w-4 h-4 text-[#1E3A5F]" />
+                <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide">Map Location Picker</h4>
               </div>
               <div className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded font-mono font-semibold">
-                Locked: Barangay Palanan
+                Barangay Palanan
               </div>
             </div>
 
-            <div className="flex-1 relative rounded border border-gray-200 overflow-hidden shadow-inner">
+            <div className="flex-1 relative rounded border border-gray-200 overflow-hidden shadow-inner min-h-[320px]">
               <InteractiveMap
                 dangerZones={dangerZones.filter(z => z.id !== editingZoneId)}
                 incidentReports={[]}
@@ -346,415 +671,698 @@ export default function DangerZoneView({
                 createLat={latitude}
                 createLng={longitude}
                 createRadius={radius}
-                createColor={selectedColorHex}
+                createColor={ZONE_COLOR}
               />
             </div>
             
             {latitude !== null && longitude !== null ? (
-              <div className="p-2.5 bg-blue-50/50 rounded border border-blue-100 flex items-center justify-between text-[11px] text-slate-700 font-mono">
-                <span className="font-bold uppercase tracking-wider text-[9px] text-[#1E3A5F]">Active Captured Pinpoint:</span>
+              <div className="p-2.5 bg-blue-50/70 rounded border border-blue-200 flex items-center justify-between text-[11px] text-slate-700 font-mono">
+                <span className="font-bold uppercase tracking-wider text-[9px] text-[#1E3A5F]">Captured Pinpoint:</span>
                 <span>LAT: {latitude.toFixed(6)} | LNG: {longitude.toFixed(6)}</span>
               </div>
             ) : (
-              <div className="p-2.5 bg-yellow-50 rounded border border-yellow-100 text-center text-xs text-yellow-800 animate-pulse font-medium">
-                ⚠️ Click on the map above to select the geocentered safety breach location
+              <div className="p-2.5 bg-amber-50 rounded border border-amber-200 text-center text-xs text-amber-800 animate-pulse font-medium">
+                ⚠️ Click on the map to set the center point or type coordinates below
               </div>
             )}
           </div>
 
-          {/* Form and Live preview pane (5 Cols) */}
-          <div className="lg:col-span-5 flex flex-col space-y-4">
-            {/* Live Preview Card */}
-            <div className="bg-slate-900 text-white rounded p-4 shadow-md border border-slate-800 relative overflow-hidden flex flex-col justify-between h-[150px]">
-              <div className="absolute top-0 right-0 p-8 w-32 h-32 bg-white/5 rounded-full blur-2xl pointer-events-none" />
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-[9px] font-bold text-slate-400 tracking-widest uppercase">LIVE WARNING PREVIEW</span>
-                  <p className="text-sm font-bold text-white mt-1">{locationName ? locationName : "Untitled Pinpoint Target"}</p>
-                </div>
-                <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded uppercase ${DANGER_LEVEL_COLORS[riskLevel].bgClass}`}>
-                  {riskLevel} RISK
-                </span>
-              </div>
-
-              <div className="flex items-end justify-between pt-4 border-t border-slate-800">
-                <div className="grid grid-cols-2 gap-x-4 text-[11px]">
-                  <div>
-                    <span className="text-[9px] text-slate-500 font-mono block uppercase">TYPE</span>
-                    <span className="font-semibold text-slate-200">{category}</span>
-                  </div>
-                  <div>
-                    <span className="text-[9px] text-slate-500 font-mono block uppercase">RADIUS EFFECT</span>
-                    <span className="font-semibold text-slate-200 font-mono">{radius} meters</span>
-                  </div>
-                </div>
-                <div className="text-right text-[10px] text-slate-500">
-                  <span className="block uppercase text-[8px]">GEOFENCE COLOR</span>
-                  <div className="flex items-center justify-end space-x-1.5 mt-0.5">
-                    <span className="w-2 h-2 rounded-full block animate-pulse" style={{ backgroundColor: selectedColorHex }} />
-                    <span className="font-bold text-slate-300 font-mono">{DANGER_LEVEL_COLORS[riskLevel].name}</span>
-                  </div>
-                </div>
-              </div>
+          {/* Form Pane (7 Cols) - Grouped Fields */}
+          <div className="lg:col-span-7 bg-white border border-gray-200 rounded p-5 shadow-sm space-y-5">
+            
+            <div className="flex items-center justify-between border-b pb-3 border-slate-100">
+              <h4 className="font-bold text-sm text-slate-900 font-display">
+                {editingZoneId ? 'Amend Danger Zone Record' : 'Rapid Danger Zone Entry'}
+              </h4>
+              <span className="text-[11px] text-gray-500 font-sans">
+                {noSplitMode ? '⚡ Total Count Mode' : '🌓 Split Day/Night Mode'}
+              </span>
             </div>
 
-            {/* Parameter configuration parameters */}
-            <form onSubmit={handleSave} className="bg-white border border-gray-200 rounded p-4 shadow-sm flex flex-col space-y-3.5 h-[354px] justify-between">
-              <div>
-                <h4 className="font-bold text-xs text-slate-800 uppercase tracking-widest border-b pb-2 mb-3">
-                  Configure Hazard Area Settings
-                </h4>
+            {formError && (
+              <div className="p-3 border border-red-200 bg-red-50 text-xs text-red-700 rounded font-medium flex items-center space-x-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{formError}</span>
+              </div>
+            )}
 
-                {formError && (
-                  <div className="p-2 border border-red-200 bg-red-50 text-[11px] text-red-700 rounded font-medium mb-3">
-                    {formError}
+            <form onSubmit={(e) => handleSave(e, false)} className="space-y-6">
+
+              {/* Group 1: Location */}
+              <div className="space-y-3 bg-slate-50/70 p-3.5 rounded border border-slate-200">
+                <div className="flex items-center space-x-2 text-xs font-bold text-slate-800 uppercase tracking-wide">
+                  <MapPin className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>1. Location Details</span>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                    Location Name <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Dian Street corner Buendia Avenue"
+                    value={locationName}
+                    onChange={(e) => setLocationName(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-xs text-slate-800 focus:outline-[#1E3A5F]"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Latitude ({STUDY_AREA_BOUNDS.minLat} - {STUDY_AREA_BOUNDS.maxLat}) <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="number"
+                      step="0.000001"
+                      required
+                      placeholder="14.558500"
+                      value={latitude !== null ? latitude : ''}
+                      onChange={(e) => setLatitude(e.target.value ? parseFloat(e.target.value) : null)}
+                      className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-xs font-mono text-slate-800 focus:outline-[#1E3A5F]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Longitude ({STUDY_AREA_BOUNDS.minLng} - {STUDY_AREA_BOUNDS.maxLng}) <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="number"
+                      step="0.000001"
+                      required
+                      placeholder="121.002000"
+                      value={longitude !== null ? longitude : ''}
+                      onChange={(e) => setLongitude(e.target.value ? parseFloat(e.target.value) : null)}
+                      className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-xs font-mono text-slate-800 focus:outline-[#1E3A5F]"
+                    />
+                  </div>
+                </div>
+
+                {/* Radius Tool with Live Circle sync */}
+                <div>
+                  <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                    <span>Radius (Meters) <span className="text-red-500">*</span></span>
+                    <span className="font-mono text-[#1E3A5F] bg-blue-50 px-2 py-0.5 rounded font-bold">{radius} m</span>
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="range"
+                      min="10"
+                      max="500"
+                      step="5"
+                      value={radius}
+                      onChange={(e) => handleRadiusChange(Number(e.target.value))}
+                      className="flex-1 accent-[#1E3A5F] h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer"
+                    />
+                    <input
+                      type="number"
+                      min="10"
+                      max="1000"
+                      value={radius}
+                      onChange={(e) => handleRadiusChange(Number(e.target.value))}
+                      className="w-20 bg-white border border-slate-300 rounded px-2 py-1 text-xs text-center font-mono font-bold"
+                    />
+                  </div>
+
+                  {/* Quick preset buttons */}
+                  <div className="flex items-center space-x-1 mt-1.5">
+                    <span className="text-[9px] text-gray-400 font-bold uppercase">Presets:</span>
+                    {[50, 100, 150, 200, 300].map(r => (
+                      <button
+                        key={r}
+                        type="button"
+                        onClick={() => handleRadiusChange(r)}
+                        className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${
+                          radius === r 
+                            ? 'bg-[#1E3A5F] text-white border-[#1E3A5F] font-bold' 
+                            : 'bg-white text-slate-600 hover:bg-slate-100 border-slate-200'
+                        }`}
+                      >
+                        {r}m
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Group 2: Time & Crime Data */}
+              <div className="space-y-3.5 bg-slate-50/70 p-3.5 rounded border border-slate-200">
+                <div className="flex items-center justify-between text-xs font-bold text-slate-800 uppercase tracking-wide">
+                  <div className="flex items-center space-x-2">
+                    <Clock className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>2. Time & Crime Data</span>
+                  </div>
+
+                  {/* "No day/night split" mode toggle */}
+                  <label className="flex items-center space-x-1.5 cursor-pointer normal-case text-slate-700 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={noSplitMode}
+                      onChange={(e) => handleToggleNoSplit(e.target.checked)}
+                      className="rounded text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span className="font-semibold text-slate-800 text-[11px]">No day/night split</span>
+                  </label>
+                </div>
+
+                {/* Counts Inputs */}
+                {noSplitMode ? (
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Total Crime Count (All Day) <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={directCrimeCount}
+                      onChange={(e) => setDirectCrimeCount(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                      className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-sm font-bold text-slate-900 focus:outline-[#1E3A5F]"
+                    />
+                    <p className="text-[10px] text-gray-500 mt-1">
+                      Active hours are locked to All Day in this mode.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-3 items-end">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                        Night Crimes
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={nightCrimeCount}
+                        onChange={(e) => handleCountsChange(Number(e.target.value), dayCrimeCount)}
+                        className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono font-bold text-slate-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                        Day Crimes
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={dayCrimeCount}
+                        onChange={(e) => handleCountsChange(nightCrimeCount, Number(e.target.value))}
+                        className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono font-bold text-slate-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                        Total Crimes (Auto)
+                      </label>
+                      <div className="bg-slate-200 border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono font-bold text-slate-900 flex items-center justify-between">
+                        <span>{effectiveCrimeCount}</span>
+                        {effectiveCrimeCount >= HIGH_INCIDENT_THRESHOLD && (
+                          <span className="text-[9px] bg-neutral-800 text-neutral-200 border border-neutral-700 px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">
+                            High (≥{HIGH_INCIDENT_THRESHOLD})
+                          </span>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 )}
 
-                <div className="space-y-3">
-                  {/* Location name input */}
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Location Name</label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. Taft Avenue near Cash & Carry"
-                      value={locationName}
-                      onChange={(e) => setLocationName(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded px-3 py-1.5 text-xs text-slate-800 focus:outline-[#1E3A5F] placeholder-slate-400 font-sans"
-                    />
-                  </div>
-
-                  {/* Danger type dropdown */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Danger Type</label>
-                      <select
-                        value={category}
-                        onChange={(e) => setCategory(e.target.value as any)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800 focus:outline-[#1E3A5F] font-sans"
-                      >
-                        {CATEGORIES.map(cat => (
-                          <option key={cat} value={cat}>{cat}</option>
-                        ))}
-                      </select>
-                    </div>
-
-                    {/* Danger level selector */}
-                    <div>
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Danger Level</label>
-                      <select
-                        value={riskLevel}
-                        onChange={(e) => setRiskLevel(e.target.value as any)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800 focus:outline-[#1E3A5F] font-bold font-sans"
-                        style={{ color: selectedColorHex }}
-                      >
-                        {RISK_LEVELS.map(level => (
-                          <option key={level} value={level}>
-                            {level}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* Adjustable Radius Tool */}
-                  <div>
-                    <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
-                      <span>Adjustable Radius Tool</span>
-                      <span className="font-mono text-[#1E3A5F] bg-blue-50 px-1.5 rounded">{radius} meters</span>
-                    </div>
-
-                    <div className="flex items-center space-x-2">
-                      {/* Plus Minus buttons */}
-                      <button
-                        type="button"
-                        onClick={() => handleRadiusChange(radius - 50)}
-                        className="p-1 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded font-bold border border-slate-200 text-xs shrink-0 select-none"
-                      >
-                        -50
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleRadiusChange(radius - 10)}
-                        className="p-1 px-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded font-bold border border-slate-200 text-xs shrink-0 select-none"
-                      >
-                        -10
-                      </button>
-
-                      {/* Slider Input */}
-                      <input
-                        type="range"
-                        min="10"
-                        max="1000"
-                        step="5"
-                        value={radius}
-                        onChange={(e) => handleRadiusChange(Number(e.target.value))}
-                        className="flex-1 accent-[#1E3A5F] h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer"
-                      />
-
-                      <button
-                        type="button"
-                        onClick={() => handleRadiusChange(radius + 10)}
-                        className="p-1 px-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded font-bold border border-slate-200 text-xs shrink-0 select-none"
-                      >
-                        +10
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleRadiusChange(radius + 50)}
-                        className="p-1 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded font-bold border border-slate-200 text-xs shrink-0 select-none"
-                      >
-                        +50
-                      </button>
-                    </div>
-
-                    {/* Numeric Input & Quick Radii selection */}
-                    <div className="flex items-center justify-between text-xs space-x-2 mt-2">
-                      <div className="flex items-center space-x-1">
-                        <span className="text-[9px] text-gray-400 font-bold uppercase">Quick Selection:</span>
-                        {[50, 100, 200, 300, 500].map(r => (
-                          <button
-                            key={r}
-                            type="button"
-                            onClick={() => handleRadiusChange(r)}
-                            className={`p-0.5 px-2.5 text-[10px] rounded border transition-colors ${
-                              radius === r 
-                                ? 'bg-[#1E3A5F] text-white border-[#1E3A5F] font-bold' 
-                                : 'bg-slate-50 text-slate-600 hover:bg-slate-100'
-                            }`}
-                          >
-                            {r}m
-                          </button>
-                        ))}
-                      </div>
-
-                      <div className="flex items-center space-x-1 shrink-0">
-                        <input
-                          type="number"
-                          min="10"
-                          max="1000"
-                          value={radius}
-                          onChange={(e) => handleRadiusChange(Number(e.target.value))}
-                          className="w-16 bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 text-xs text-center font-mono font-bold focus:outline-[#1E3A5F]"
-                        />
-                        <span className="text-[10px] text-gray-400 font-semibold font-mono">meters</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Safety remarks specifications */}
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Advisory Remarks</label>
-                    <textarea
-                      rows={2}
-                      maxLength={180}
-                      placeholder="Add descriptions or actionable warning advisories for nearby mobile residents..."
-                      value={description}
-                      onChange={(e) => setDescription(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1 text-xs text-slate-800 placeholder-slate-400 focus:outline-[#1E3A5F] resize-none font-sans"
-                    />
-                  </div>
-
-                  {/* Hazard / Incident Photo Evidence */}
+                {/* Active Time & Operating Hours */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
-                      Hazard / Evidence Photo URL
+                      Active Time
                     </label>
-                    <div className="flex items-center space-x-2">
-                      <div className="relative flex-1">
-                        <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-gray-400">
-                          <ImageIcon className="w-3.5 h-3.5" />
-                        </div>
-                        <input
-                          type="url"
-                          placeholder="https://... or uploaded image URL"
-                          value={imageUrl}
-                          onChange={(e) => setImageUrl(e.target.value)}
-                          className="w-full bg-slate-50 border border-slate-200 rounded pl-8 pr-3 py-1.5 text-xs text-slate-800 focus:outline-[#1E3A5F] placeholder-slate-400 font-sans"
-                        />
-                      </div>
-                      {imageUrl && (
-                        <button
-                          type="button"
-                          onClick={() => setImageUrl('')}
-                          className="p-1.5 text-slate-400 hover:text-red-500 rounded border border-slate-200 hover:bg-slate-50 transition-colors"
-                          title="Clear image URL"
-                        >
-                          <X className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
+                    <select
+                      disabled={noSplitMode}
+                      value={activeTime}
+                      onChange={(e) => handleActiveTimeChange(e.target.value as any)}
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-800 focus:outline-[#1E3A5F] disabled:bg-slate-100 disabled:text-gray-400 font-medium"
+                    >
+                      <option value="all_day">All Day (24 hrs)</option>
+                      <option value="night_only">Night Only (18:00 - 5:00)</option>
+                      <option value="day_only">Day Only (5:00 - 18:00)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Start Hour (0-23)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="23"
+                      value={startHour}
+                      onChange={(e) => setStartHour(Math.min(23, Math.max(0, parseInt(e.target.value, 10) || 0)))}
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono text-slate-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      End Hour (0-23)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="23"
+                      value={endHour}
+                      onChange={(e) => setEndHour(Math.min(23, Math.max(0, parseInt(e.target.value, 10) || 0)))}
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono text-slate-800"
+                    />
+                  </div>
+                </div>
 
-                    {/* Image Preview Thumbnail */}
-                    {imageUrl && (
-                      <div className="mt-2 relative group w-full h-20 bg-slate-900 rounded border border-slate-200 overflow-hidden flex items-center justify-center">
-                        <img
-                          src={imageUrl}
-                          alt="Hazard Preview"
-                          className="w-full h-full object-cover"
-                          onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
-                        />
-                        <div 
-                          onClick={() => setPreviewImage(imageUrl)}
-                          className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white cursor-pointer"
-                        >
-                          <span className="text-[10px] font-medium flex items-center space-x-1">
-                            <Maximize2 className="w-3 h-3" />
-                            <span>Inspect</span>
-                          </span>
-                        </div>
+                {/* Data Period & Last Incident Date */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Data Period
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Jan 2025 - Sep 2026"
+                      value={dataPeriod}
+                      onChange={(e) => setDataPeriod(e.target.value)}
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Last Incident Date
+                    </label>
+                    <input
+                      type="date"
+                      value={lastIncidentDate}
+                      onChange={(e) => setLastIncidentDate(e.target.value)}
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-800"
+                    />
+                  </div>
+                </div>
+
+                {/* Crime Types dynamic pairs */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                      Crime Types Breakdown
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleAddCrimeTypeRow}
+                      className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 flex items-center space-x-1"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>Add Crime Type</span>
+                    </button>
+                  </div>
+
+                  <div className="space-y-1.5 max-h-36 overflow-y-auto">
+                    {crimeTypeRows.length === 0 ? (
+                      <div className="text-[11px] text-gray-400 italic bg-white p-2 rounded border border-dashed border-gray-200 text-center">
+                        No crime types specified. Click "Add Crime Type" to specify breakdown (e.g. theft: 3, snatching: 2).
                       </div>
+                    ) : (
+                      crimeTypeRows.map((row, idx) => (
+                        <div key={idx} className="flex items-center space-x-2">
+                          <input
+                            type="text"
+                            placeholder="Type (e.g. theft, robbery, assault)"
+                            value={row.type}
+                            onChange={(e) => handleUpdateCrimeTypeRow(idx, 'type', e.target.value)}
+                            className="flex-1 bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-800"
+                          />
+                          <input
+                            type="number"
+                            min="0"
+                            placeholder="Count"
+                            value={row.count}
+                            onChange={(e) => handleUpdateCrimeTypeRow(idx, 'count', e.target.value)}
+                            className="w-20 bg-white border border-slate-300 rounded px-2 py-1 text-xs text-center font-mono font-bold"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveCrimeTypeRow(idx)}
+                            className="p-1 text-gray-400 hover:text-rose-600 rounded"
+                            title="Remove type"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))
                     )}
                   </div>
                 </div>
+
               </div>
 
-              {/* Action Buttons */}
-              <div className="flex items-center space-x-3 pt-2 text-xs">
-                <button
-                  type="submit"
-                  className="flex-1 py-2 px-3 bg-[#1E3A5F] hover:bg-[#132844] text-white rounded font-bold uppercase transition-colors shadow-sm flex items-center justify-center space-x-1.5 cursor-pointer"
-                >
-                  <Check className="w-4 h-4" />
-                  <span>{editingZoneId ? 'Save Amendments' : 'Publish Zone'}</span>
-                </button>
+              {/* Group 3: Details */}
+              <div className="space-y-3 bg-slate-50/70 p-3.5 rounded border border-slate-200">
+                <div className="flex items-center space-x-2 text-xs font-bold text-slate-800 uppercase tracking-wide">
+                  <Layers className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>3. Classification & Remarks</span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Hazard Category
+                    </label>
+                    <select
+                      value={category}
+                      onChange={(e) => setCategory(e.target.value)}
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-800 focus:outline-[#1E3A5F]"
+                    >
+                      {STANDARD_CATEGORIES.map(cat => (
+                        <option key={cat} value={cat}>{cat}</option>
+                      ))}
+                      {!STANDARD_CATEGORIES.includes(category as any) && (
+                        <option value={category}>{category}</option>
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      Data Origin Source
+                    </label>
+                    <select
+                      value={source}
+                      onChange={(e) => setSource(e.target.value as any)}
+                      className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-800 focus:outline-[#1E3A5F]"
+                    >
+                      <option value="barangay_data">Barangay Official Data</option>
+                      <option value="resident_report">Resident Report</option>
+                      <option value="both">Both (Corroborated)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                    Advisory Description
+                  </label>
+                  <textarea
+                    rows={2}
+                    maxLength={200}
+                    placeholder="Short safety summary or preventative guidelines..."
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded px-2.5 py-1 text-xs text-slate-800 resize-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                    Evidence Image URL (Optional)
+                  </label>
+                  <input
+                    type="url"
+                    placeholder="https://..."
+                    value={imageUrl}
+                    onChange={(e) => setImageUrl(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded px-2.5 py-1 text-xs text-slate-800"
+                  />
+                </div>
+              </div>
+
+              {/* Form Action Buttons */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
                 <button
                   type="button"
                   onClick={cancelAction}
-                  className="py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold border border-gray-200 transition-colors flex items-center justify-center cursor-pointer"
-                  title="Cancel changes"
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-semibold border border-slate-300 cursor-pointer"
                 >
-                  <X className="w-4 h-4" />
+                  Cancel
                 </button>
+
+                <div className="flex items-center space-x-2">
+                  {!editingZoneId && (
+                    <button
+                      type="button"
+                      onClick={(e) => handleSave(e, true)}
+                      className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded text-xs font-semibold cursor-pointer"
+                      title="Saves this record and immediately prepares form for next entry with same Period and Source"
+                    >
+                      Save and Add Another
+                    </button>
+                  )}
+
+                  <button
+                    type="submit"
+                    className="px-5 py-2 bg-[#1E3A5F] hover:bg-[#132844] text-white rounded text-xs font-bold uppercase transition-colors shadow-sm flex items-center space-x-1.5 cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>{editingZoneId ? 'Save Amendments' : 'Publish Zone'}</span>
+                  </button>
+                </div>
               </div>
+
             </form>
+
           </div>
+
         </div>
       )}
 
-      {/* Main Danger Zones listings registered */}
-      <div className="bg-white border border-gray-200 rounded shadow-sm overflow-hidden" id="danger-zones-registry-list animate-slide-in">
-        <div className="p-4 border-b border-gray-100 bg-[#1E3A5F] text-white flex justify-between items-center">
+      {/* Main Danger Zones Listings Registry */}
+      <div className="bg-white border border-gray-200 rounded shadow-sm overflow-hidden" id="danger-zones-registry-list">
+        
+        {/* Table Header & Search Filter Bar */}
+        <div className="p-4 border-b border-gray-200 bg-slate-50 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
           <div className="flex items-center space-x-2">
-            <AlertTriangle className="w-5 h-5 text-amber-400" />
-            <h3 className="font-bold text-xs tracking-wider uppercase font-display">Active Municipal Warning Geofencing</h3>
+            <ShieldAlert className="w-5 h-5 text-[#1E3A5F]" />
+            <h3 className="font-bold text-xs tracking-wider uppercase font-display text-slate-900">
+              Barangay Palanan Danger Zones Registry
+            </h3>
+            <span className="bg-slate-200 text-slate-700 font-mono text-[10px] px-2 py-0.5 rounded font-bold">
+              {filteredZones.length} / {uniqueDangerZones.length}
+            </span>
           </div>
-          <span className="bg-slate-800 text-white font-mono text-[10px] px-2 py-0.5 rounded font-bold">
-            {dangerZones.length} Registered Locations
-          </span>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Search */}
+            <input
+              type="text"
+              placeholder="Filter by name..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="bg-white border border-slate-300 rounded px-2.5 py-1 text-xs text-slate-800 placeholder-slate-400 w-36 focus:outline-[#1E3A5F]"
+            />
+
+            {/* Category filter */}
+            <select
+              value={filterCategory}
+              onChange={(e) => setFilterCategory(e.target.value)}
+              className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700"
+            >
+              <option value="all">All Categories</option>
+              {STANDARD_CATEGORIES.map(c => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+
+            {/* Source filter */}
+            <select
+              value={filterSource}
+              onChange={(e) => setFilterSource(e.target.value)}
+              className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700"
+            >
+              <option value="all">All Sources</option>
+              <option value="barangay_data">Barangay Data</option>
+              <option value="resident_report">Resident Report</option>
+              <option value="both">Both</option>
+            </select>
+
+            {/* Active Time filter */}
+            <select
+              value={filterActiveTime}
+              onChange={(e) => setFilterActiveTime(e.target.value)}
+              className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700"
+            >
+              <option value="all">All Time Windows</option>
+              <option value="night_only">Night Only</option>
+              <option value="day_only">Day Only</option>
+              <option value="all_day">All Day</option>
+            </select>
+
+            {/* Needs Location toggle */}
+            <button
+              type="button"
+              onClick={() => setFilterNeedsLocationOnly(!filterNeedsLocationOnly)}
+              className={`px-2 py-1 rounded text-xs font-semibold border ${
+                filterNeedsLocationOnly
+                  ? 'bg-amber-100 text-amber-800 border-amber-300'
+                  : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-100'
+              }`}
+            >
+              Needs Location
+            </button>
+          </div>
         </div>
 
-        {dangerZones.length === 0 ? (
+        {/* Table Body */}
+        {filteredZones.length === 0 ? (
           <div className="p-12 text-center text-xs text-gray-400">
-            <AlertTriangle className="w-12 h-12 text-slate-200 mx-auto mb-2" />
-            No hazard zones registered. Click "Add Danger Zone" to configure your first geofence.
+            <AlertTriangle className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+            No danger zones match current filters.
           </div>
         ) : (
           <div className="overflow-x-auto text-xs">
             <table className="w-full text-left border-collapse font-sans">
               <thead>
-                <tr className="bg-slate-50 border-b border-gray-200 text-slate-600 uppercase tracking-widest font-bold text-[9px]">
-                  <th className="py-3 px-4 w-1/3">Geocentered Target Name</th>
-                  <th className="py-3 px-4">Photo / Proof</th>
-                  <th className="py-3 px-4">Classification</th>
-                  <th className="py-3 px-4">Warning Risk Level</th>
-                  <th className="py-3 px-4">Captured Position</th>
-                  <th className="py-3 px-4">Operational Status</th>
+                <tr className="bg-slate-100 border-b border-gray-200 text-slate-600 uppercase tracking-widest font-bold text-[9px]">
+                  <th className="py-3 px-4">Location Target</th>
+                  <th className="py-3 px-4">Category</th>
+                  <th className="py-3 px-4">Crimes Recorded</th>
+                  <th className="py-3 px-4">Active Schedule</th>
+                  <th className="py-3 px-4">Data Source</th>
+                  <th className="py-3 px-4">Radius & Geo</th>
+                  <th className="py-3 px-4">Status</th>
                   <th className="py-3 px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 text-slate-700">
-                {dangerZones.map((zone) => {
-                  let mappedColorText = String(zone.color || 'Orange').toUpperCase();
-                  const levelUpper = String(zone.riskLevel).toUpperCase();
-                  if (levelUpper === 'LOW') mappedColorText = 'GREEN';
-                  else if (levelUpper === 'MEDIUM' || levelUpper === 'MODERATE') mappedColorText = 'ORANGE';
-                  else if (levelUpper === 'HIGH' || levelUpper === 'CRITICAL') mappedColorText = 'RED';
-
+                {filteredZones.map((zone) => {
+                  const crimes = zone.crimeCount ?? ((zone.nightCrimeCount ?? 0) + (zone.dayCrimeCount ?? 0));
+                  const isHighIncident = crimes >= HIGH_INCIDENT_THRESHOLD;
                   const zoneImg = getReportImage(zone);
+                  const isNeedsLoc = zone.needsLocation === true;
 
                   return (
-                    <tr key={zone.id} className="hover:bg-slate-50">
+                    <tr key={zone.id} className={`hover:bg-slate-50/80 ${isNeedsLoc ? 'bg-amber-50/30' : ''}`}>
+                      
+                      {/* Location Target */}
                       <td className="py-3 px-4">
-                        <div className="font-bold text-slate-900">{resolveLocationName(zone)}</div>
-                        <p className="text-[11px] text-gray-500 line-clamp-1 mt-0.5">{safeString(zone.description) || 'No safety advisory text is active.'}</p>
+                        <div className="font-bold text-slate-900 flex items-center space-x-2">
+                          <span 
+                            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                              isNeedsLoc || zone.status === 'inactive'
+                                ? 'border border-dashed border-[#EA580C] bg-[#EA580C]/25 opacity-70'
+                                : 'bg-[#EA580C]'
+                            }`}
+                            title={isNeedsLoc ? 'Needs Location (Unmapped)' : zone.status === 'inactive' ? 'Inactive Zone' : 'Active Zone'}
+                          />
+                          <span>{resolveLocationName(zone)}</span>
+                          {isNeedsLoc && (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded font-bold bg-amber-100 text-amber-800 border border-amber-200 uppercase">
+                              Needs Location
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-gray-500 line-clamp-1 mt-0.5 ml-4.5">
+                          {safeString(zone.description) || 'No safety remarks registered.'}
+                        </p>
                       </td>
-                      <td className="py-3 px-4" onClick={(e) => { if (zoneImg) { e.stopPropagation(); setPreviewImage(zoneImg); } }}>
-                        {zoneImg ? (
-                          <div className="relative group w-12 h-12 rounded border border-gray-200 overflow-hidden bg-slate-100 flex items-center justify-center hover:ring-2 hover:ring-indigo-500 transition-all cursor-zoom-in shadow-xs">
-                            <img 
-                              src={zoneImg} 
-                              alt="Zone Photo" 
-                              className="w-full h-full object-cover" 
-                              onError={(e) => { 
-                                const target = e.target as HTMLElement;
-                                if (target.parentElement) {
-                                  target.parentElement.innerHTML = '<span class="text-[9px] text-gray-400 font-mono italic">Failed to load</span>';
-                                }
-                              }}
-                            />
-                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-white">
-                              <Maximize2 className="w-4 h-4" />
-                            </div>
-                          </div>
-                        ) : (
-                          <span className="inline-flex items-center space-x-1 text-[10px] font-medium text-slate-500 bg-slate-100 border border-slate-200 px-2 py-1 rounded-full whitespace-nowrap">
-                            <Camera className="w-3 h-3 text-slate-400 shrink-0" />
-                            <span>No photo attached</span>
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 font-medium text-slate-600">
+
+                      {/* Category */}
+                      <td className="py-3 px-4 font-medium text-slate-700">
                         {zone.category}
                       </td>
-                      <td className="py-3 px-4">
-                        <span className={`font-bold text-[10px] px-2.5 py-0.5 rounded uppercase ${getRiskColorClass(zone.riskLevel)}`}>
-                          {zone.riskLevel} ({zone.radius}m • {mappedColorText})
+
+                      {/* Crimes Recorded */}
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        <div className="flex items-center space-x-1.5">
+                          <span className="font-bold font-mono text-xs text-slate-900">
+                            {crimes}
+                          </span>
+                          {isHighIncident && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-200 border border-neutral-700 font-bold uppercase tracking-wider">
+                              High Incident
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-gray-400 font-mono">
+                          N: {zone.nightCrimeCount ?? 0} | D: {zone.dayCrimeCount ?? 0}
+                        </div>
+                      </td>
+
+                      {/* Active Schedule */}
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        <span className="font-semibold text-slate-800 block text-[11px]">
+                          {zone.activeTime === 'night_only' ? 'Night Only' : zone.activeTime === 'day_only' ? 'Day Only' : 'All Day'}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-mono">
+                          {zone.activeTime === 'all_day' 
+                            ? 'All Day (24 hrs)' 
+                            : `${zone.startHour ?? (zone.activeTime === 'night_only' ? 18 : 5)}:00 - ${zone.endHour ?? (zone.activeTime === 'night_only' ? 5 : 18)}:00`}
                         </span>
                       </td>
-                      <td className="py-3 px-4 font-mono text-[10px] text-slate-500">
-                        {typeof zone.latitude === 'number' && !isNaN(zone.latitude) ? zone.latitude.toFixed(5) : 'N/A'}, {typeof zone.longitude === 'number' && !isNaN(zone.longitude) ? zone.longitude.toFixed(5) : 'N/A'}
+
+                      {/* Data Source */}
+                      <td className="py-3 px-4">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700">
+                          {zone.source === 'barangay_data' ? 'Barangay' : zone.source === 'resident_report' ? 'Resident' : 'Both'}
+                        </span>
+                        {zone.dataPeriod && (
+                          <div className="text-[9px] text-gray-400 mt-0.5 truncate max-w-[120px]">
+                            {zone.dataPeriod}
+                          </div>
+                        )}
                       </td>
-                      <td className="py-3 px-4 font-sans">
+
+                      {/* Radius & Geo */}
+                      <td className="py-3 px-4 font-mono text-[10px] text-slate-500 whitespace-nowrap">
+                        <div>{zone.radius}m zone</div>
+                        {isNeedsLoc ? (
+                          <span className="text-amber-700 font-semibold italic">Unmapped</span>
+                        ) : (
+                          <div>
+                            {typeof zone.latitude === 'number' && !isNaN(zone.latitude) ? zone.latitude.toFixed(4) : 'N/A'}, 
+                            {typeof zone.longitude === 'number' && !isNaN(zone.longitude) ? zone.longitude.toFixed(4) : 'N/A'}
+                          </div>
+                        )}
+                      </td>
+
+                      {/* Status */}
+                      <td className="py-3 px-4 whitespace-nowrap">
                         <button
                           onClick={() => toggleStatus(zone)}
-                          className={`inline-flex items-center space-x-1.5 font-bold ${
-                            zone.status === 'active' ? 'text-emerald-600 hover:text-emerald-700' : 'text-slate-400 hover:text-slate-500'
+                          className={`inline-flex items-center space-x-1 font-bold text-[11px] ${
+                            isNeedsLoc 
+                              ? 'text-amber-600 cursor-not-allowed opacity-80'
+                              : zone.status === 'active' 
+                              ? 'text-emerald-600 hover:text-emerald-700 cursor-pointer' 
+                              : 'text-slate-400 hover:text-slate-500 cursor-pointer'
                           }`}
-                          title="Click to toggle warning publication"
+                          title={isNeedsLoc ? 'Activation blocked until coordinates are set' : 'Toggle online publication'}
                         >
-                          {zone.status === 'active' ? (
-                            <>
-                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                              <span>ONLINE</span>
-                            </>
-                          ) : (
-                            <>
-                              <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
-                              <span>OFFLINE</span>
-                            </>
-                          )}
+                          <span className={`w-1.5 h-1.5 rounded-full ${isNeedsLoc ? 'bg-amber-400' : zone.status === 'active' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
+                          <span>{isNeedsLoc ? 'NEEDS COORDS' : zone.status === 'active' ? 'ONLINE' : 'OFFLINE'}</span>
                         </button>
                       </td>
-                      <td className="py-3 px-4 text-right">
-                        <div className="flex items-center justify-end space-x-2 text-xs">
+
+                      {/* Actions */}
+                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                        <div className="flex items-center justify-end space-x-1.5 text-xs">
+                          {isNeedsLoc && (
+                            <button
+                              onClick={() => startEdit(zone)}
+                              className="p-1 px-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded font-semibold flex items-center space-x-1 cursor-pointer"
+                              title="Set Location Pinpoint"
+                            >
+                              <MapPin className="w-3 h-3 text-amber-600" />
+                              <span>Set Pinpoint</span>
+                            </button>
+                          )}
+
                           <button
                             onClick={() => startEdit(zone)}
-                            className="p-1 px-2.5 border border-slate-200 hover:bg-slate-100 text-slate-700 rounded transition-colors flex items-center space-x-1 font-semibold cursor-pointer"
+                            className="p-1 px-2 border border-slate-200 hover:bg-slate-100 text-slate-700 rounded font-semibold flex items-center space-x-1 cursor-pointer"
                           >
-                            <Edit2 className="w-3.5 h-3.5" />
+                            <Edit2 className="w-3 h-3" />
                             <span>Edit</span>
                           </button>
+
                           <button
                             onClick={() => handleDelete(zone.id, zone.locationName)}
-                            className="p-1.5 border border-red-200 hover:bg-red-50 text-red-600 rounded transition-colors cursor-pointer"
-                            title="Delete Geofence Alert"
+                            className="p-1 text-slate-400 hover:text-red-600 rounded transition-colors cursor-pointer"
+                            title="Delete Zone"
                           >
-                            <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </td>
+
                     </tr>
                   );
                 })}
@@ -762,75 +1370,8 @@ export default function DangerZoneView({
             </table>
           </div>
         )}
+
       </div>
-
-      {/* Lightbox inspection modal */}
-      {previewImage && (
-        <div 
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200"
-          onClick={() => setPreviewImage(null)}
-        >
-          <div 
-            className="relative max-w-4xl w-full bg-slate-900 border border-slate-700 rounded-lg overflow-hidden shadow-2xl flex flex-col max-h-[90vh]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between px-4 py-3 bg-slate-800/90 border-b border-slate-700 text-white">
-              <div className="flex items-center space-x-2">
-                <Camera className="w-4 h-4 text-indigo-400" />
-                <span className="text-xs font-bold font-display uppercase tracking-wider">Hazard Area Photo Evidence</span>
-              </div>
-              <div className="flex items-center space-x-3">
-                <a 
-                  href={previewImage} 
-                  target="_blank" 
-                  rel="noreferrer" 
-                  className="inline-flex items-center space-x-1 text-[11px] text-slate-300 hover:text-white bg-slate-700/60 px-2 py-1 rounded transition-colors"
-                >
-                  <ExternalLink className="w-3 h-3" />
-                  <span>Open Full File</span>
-                </a>
-                <button
-                  onClick={() => setPreviewImage(null)}
-                  className="p-1 rounded-full text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-black/50">
-              <img 
-                src={previewImage} 
-                alt="Enlarged Hazard Photo" 
-                className="max-h-[72vh] w-auto max-w-full object-contain rounded shadow-md"
-              />
-            </div>
-
-            <div className="px-4 py-2 bg-slate-800/80 border-t border-slate-700 text-[11px] text-slate-400 flex items-center justify-between">
-              <span>Press anywhere outside or the close icon to dismiss.</span>
-              <span className="font-mono text-[10px] text-slate-500 truncate max-w-md">{previewImage}</span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <ConfirmDialog
-        isOpen={confirmConfig !== null}
-        title={confirmConfig?.title || ""}
-        message={confirmConfig?.message || ""}
-        confirmText="Confirm"
-        cancelText="Cancel"
-        onConfirm={confirmConfig?.onConfirm || (() => {})}
-        onCancel={() => setConfirmConfig(null)}
-        isDestructive={confirmConfig?.isDestructive}
-      />
-
-      <AlertToast
-        isOpen={toastConfig !== null}
-        message={toastConfig?.message || ""}
-        type={toastConfig?.type}
-        onClose={() => setToastConfig(null)}
-      />
 
     </div>
   );

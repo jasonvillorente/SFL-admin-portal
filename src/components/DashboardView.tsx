@@ -12,7 +12,8 @@ import {
   Clock,
   MapPin
 } from 'lucide-react';
-import { DangerZone, IncidentReport, CommunityAlert, ActivityLog } from '../types';
+import { DangerZone, IncidentReport, CommunityAlert, ActivityLog, isReportConvertedToZone } from '../types';
+import { HIGH_INCIDENT_THRESHOLD } from '../utils/zoneConstants';
 import InteractiveMap from './InteractiveMap';
 
 interface DashboardViewProps {
@@ -35,14 +36,14 @@ export default function DashboardView({
   
   // Calculate critical stat counts
   const activeDangerZonesCount = dangerZones.filter(z => z.status === 'active').length;
-  const highRiskZonesCount = dangerZones.filter(
-    z => (z.riskLevel === 'HIGH' || z.riskLevel === 'High' || z.riskLevel === 'Critical') && z.status === 'active'
+  const highIncidentZonesCount = dangerZones.filter(
+    z => ((z.crimeCount ?? ((z.nightCrimeCount ?? 0) + (z.dayCrimeCount ?? 0))) >= HIGH_INCIDENT_THRESHOLD) && z.status === 'active'
   ).length;
-  const pendingReportsCount = incidentReports.filter(r => r.status === 'pending').length;
+  const pendingReportsCount = incidentReports.filter(r => r.status === 'pending' && !isReportConvertedToZone(r, dangerZones)).length;
   const totalResidentsCount = usersCount.residents;
 
-  // Render quick metric card definitions to match instructions:
-  // Registered Users, Active Danger Zones, High Risk Zones, Recent Reports
+  // Render quick metric card definitions:
+  // Registered Users, Active Danger Zones, High Incident Zones, Recent Reports
   const metrics = [
     {
       id: 'users',
@@ -64,11 +65,11 @@ export default function DashboardView({
     },
     {
       id: 'danger_high',
-      label: 'High Risk Zones',
-      value: highRiskZonesCount,
+      label: 'High Incident Zones',
+      value: highIncidentZonesCount,
       icon: AlertTriangle,
       color: 'text-red-650 bg-red-50 border-red-200',
-      description: 'Critical / High danger classifications'
+      description: `Zones with ≥ ${HIGH_INCIDENT_THRESHOLD} reported crimes`
     },
     {
       id: 'reports',

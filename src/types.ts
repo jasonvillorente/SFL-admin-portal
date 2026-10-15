@@ -27,17 +27,21 @@ export interface UserAccount {
 export interface DangerZone {
   id: string; // Document ID
   zoneId: string;
+  sourceReportId?: string;
+  reportId?: string;
   locationName: string;
   category: 'Crime' | 'Poor Lighting' | 'Flood Risk' | 'Accident-Prone Area' | 'Construction Area' | 'Suspicious Activity' | 'Crime Area' | 'Theft Area' | 'Robbery Area' | 'Assault Area' | 'Accident Prone Area' | 'Road Hazard' | 'Flood Prone Area' | 'Fire Incident Area' | 'Other' | string;
-  riskLevel: 'Low' | 'Moderate' | 'High' | 'Critical' | 'LOW' | 'MEDIUM' | 'HIGH' | string;
+  riskLevel?: 'Low' | 'Moderate' | 'High' | 'Critical' | 'LOW' | 'MEDIUM' | 'HIGH' | string; // Legacy field, kept optional to parse old documents without errors
   description: string;
-  latitude: number;
-  longitude: number;
+  latitude?: number;
+  longitude?: number;
   radius: number;
-  color: 'Green' | 'Yellow' | 'Orange' | 'Red' | string;
-  createdAt: string;
-  createdBy: string;
+  color?: 'Green' | 'Yellow' | 'Orange' | 'Red' | string;
+  createdAt?: string;
+  createdBy?: string;
+  addedBy?: string;
   status: 'active' | 'inactive' | string;
+  active?: boolean;
   imageUrl?: string;
   photoUrl?: string;
   photoURL?: string;
@@ -45,7 +49,24 @@ export interface DangerZone {
   photo?: string;
   photos?: string[];
   images?: string[];
+
+  // New Zone Data Contract fields
+  source?: 'barangay_data' | 'resident_report' | 'both';
+  activeTime?: 'night_only' | 'day_only' | 'all_day';
+  startHour?: number; // 0-23
+  endHour?: number;   // 0-23
+  nightCrimeCount?: number;
+  dayCrimeCount?: number;
+  crimeCount?: number; // Auto-calculated (night + day) in split mode, or typed directly in total-only mode
+  crimeTypes?: Record<string, number>; // e.g. { theft: 3, snatching: 2 }
+  dataPeriod?: string; // e.g. "Jan 2025 - Sep 2026"
+  lastIncidentDate?: string;
+  updatedAt?: any;
+  needsLocation?: boolean; // Set when imported without valid coordinates; blocks activation until coords set
+  importBatchId?: string; // Identifier for bulk CSV import batch
+  importedAt?: string;    // ISO timestamp of import
 }
+
 
 export interface IncidentReport {
   id: string;
@@ -84,6 +105,85 @@ export interface IncidentReport {
   fileUrl?: string;
   imageBase64?: string;
   convertedToDangerZoneId?: string;
+  isConvertedToDangerZone?: boolean;
+  geofenced?: boolean;
+  convertedAt?: string;
+}
+
+/**
+ * Checks whether an incident report has already been converted or inputted into a danger zone
+ */
+export function isReportConvertedToZone(report: any, dangerZones?: DangerZone[]): boolean {
+  if (!report) return false;
+  if (report.convertedToDangerZoneId && String(report.convertedToDangerZoneId).trim().length > 0) return true;
+  if (report.geofenced === true || report.isConvertedToDangerZone === true) return true;
+  if (report.status === 'resolved' || report.status === 'geofenced') return true;
+
+  if (dangerZones && dangerZones.length > 0) {
+    const reportLoc = (report.locationName || '').trim().toLowerCase();
+    const rLat = Number(report.latitude);
+    const rLng = Number(report.longitude);
+    const hasValidCoords = !isNaN(rLat) && !isNaN(rLng) && rLat !== 0;
+
+    return dangerZones.some(z => {
+      if (z.status === 'inactive') return false;
+      if (z.sourceReportId && (z.sourceReportId === report.id || z.sourceReportId === report.userUid)) return true;
+      if (z.reportId && z.reportId === report.id) return true;
+      if (report.convertedToDangerZoneId && (z.id === report.convertedToDangerZoneId || z.zoneId === report.convertedToDangerZoneId)) return true;
+
+      // Exact or high similarity match on location name
+      const zLoc = (z.locationName || '').trim().toLowerCase();
+      if (zLoc && reportLoc) {
+        if (zLoc === reportLoc) return true;
+        if (zLoc.length > 5 && reportLoc.length > 5 && (zLoc.includes(reportLoc) || reportLoc.includes(zLoc))) return true;
+      }
+
+      // Close geographical proximity (< 100 meters, approx 0.0009 degrees)
+      if (hasValidCoords && !z.needsLocation && typeof z.latitude === 'number' && typeof z.longitude === 'number' && z.latitude !== 0 && z.longitude !== 0) {
+        const dLat = Math.abs(z.latitude - rLat);
+        const dLng = Math.abs(z.longitude - rLng);
+        if (dLat < 0.00095 && dLng < 0.00095) {
+          return true;
+        }
+      }
+
+      return false;
+    });
+  }
+
+  return false;
+}
+
+/**
+ * Retrieves the matching danger zone associated with an incident report if one exists
+ */
+export function getMatchingZoneForReport(report: any, dangerZones?: DangerZone[]): DangerZone | undefined {
+  if (!report || !dangerZones || dangerZones.length === 0) return undefined;
+  const reportLoc = (report.locationName || '').trim().toLowerCase();
+  const rLat = Number(report.latitude);
+  const rLng = Number(report.longitude);
+  const hasValidCoords = !isNaN(rLat) && !isNaN(rLng) && rLat !== 0;
+
+  return dangerZones.find(z => {
+    if (z.status === 'inactive') return false;
+    if (z.sourceReportId && (z.sourceReportId === report.id || z.sourceReportId === report.userUid)) return true;
+    if (z.reportId && z.reportId === report.id) return true;
+    if (report.convertedToDangerZoneId && (z.id === report.convertedToDangerZoneId || z.zoneId === report.convertedToDangerZoneId)) return true;
+    
+    const zLoc = (z.locationName || '').trim().toLowerCase();
+    if (zLoc && reportLoc) {
+      if (zLoc === reportLoc) return true;
+      if (zLoc.length > 5 && reportLoc.length > 5 && (zLoc.includes(reportLoc) || reportLoc.includes(zLoc))) return true;
+    }
+
+    if (hasValidCoords && typeof z.latitude === 'number' && typeof z.longitude === 'number') {
+      const dLat = Math.abs(z.latitude - rLat);
+      const dLng = Math.abs(z.longitude - rLng);
+      if (dLat < 0.00095 && dLng < 0.00095) return true;
+    }
+
+    return false;
+  });
 }
 
 export interface CommunityAlert {

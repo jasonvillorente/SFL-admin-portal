@@ -18,13 +18,12 @@ import ConfirmDialog from './ConfirmDialog';
 import AlertToast from './AlertToast';
 
 interface SettingsViewProps {
-  onSeedDatabase: () => Promise<void>;
+  onSeedDatabase?: () => Promise<void>;
   dbProjectName: string;
   dbSyncStatus?: Record<string, { success: boolean; count?: number; error?: string }>;
 }
 
-export default function SettingsView({ onSeedDatabase, dbProjectName, dbSyncStatus = {} }: SettingsViewProps) {
-  const [seeding, setSeeding] = useState(false);
+export default function SettingsView({ dbProjectName, dbSyncStatus = {} }: SettingsViewProps) {
   const [latencyTest, setLatencyTest] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
 
@@ -48,25 +47,6 @@ export default function SettingsView({ onSeedDatabase, dbProjectName, dbSyncStat
   const [pastedConfig, setPastedConfig] = useState(getSavedOverrideString());
   const [configError, setConfigError] = useState<string | null>(null);
   const [configSuccess, setConfigSuccess] = useState(false);
-
-  const handleSeed = () => {
-    setConfirmConfig({
-      title: "Seed Safety Datasets",
-      message: "Initialize Barangay Palanan Safety Demo Database seeding? This will insert realistic hazard mock datasets (Crime, Flooding, Accidents, Poor Lighting) so the operations dashboard immediately lights up with active GIS pinpoints!",
-      onConfirm: async () => {
-        setSeeding(true);
-        try {
-          await onSeedDatabase();
-          setToastConfig({ message: "Demonstration mock hazard data successfully seeded into Firestore!", type: 'success' });
-        } catch (err: any) {
-          setToastConfig({ message: `Seeding failed: ${err.message}`, type: 'error' });
-        } finally {
-          setSeeding(false);
-          setConfirmConfig(null);
-        }
-      }
-    });
-  };
 
   const handleTestLatency = () => {
     setTesting(true);
@@ -226,35 +206,31 @@ export default function SettingsView({ onSeedDatabase, dbProjectName, dbSyncStat
           </div>
         </div>
 
-        {/* Rapid demonstrations seeding data options */}
+        {/* Production Data Integrity Indicator */}
         <div className="bg-white border border-gray-200 p-5 rounded shadow-sm flex flex-col justify-between">
           <div className="space-y-3">
             <h3 className="font-bold text-slate-900 flex items-center border-b border-gray-100 pb-2 uppercase tracking-wide">
-              <ListRestart className="w-4.5 h-4.5 mr-2 text-yellow-500" />
-              Developer Sandboxing Seeder
+              <ShieldCheck className="w-4.5 h-4.5 mr-2 text-emerald-600" />
+              Production Data Integrity
             </h3>
             
-            <p className="text-slate-500 leading-normal mb-2">
-              If this Firestore project is freshly initiated and does not contain any hazard records, clicking this seeder will insert 5 realistic, fully-localized Barangay Palanan geofences and 3 pending reports.
+            <p className="text-slate-500 leading-normal mb-2 text-xs">
+              Demonstration data seeding is permanently disabled. All danger zones, resident incident reports, and community alerts reflect authentic, real-time Firestore operations authenticated by your administrative identity.
             </p>
 
-            <div className="p-3 bg-yellow-50 border-l-4 border-yellow-500 rounded text-yellow-800 leading-normal flex items-start space-x-2">
-              <AlertOctagon className="w-5 h-5 shrink-0 mt-0.5" />
+            <div className="p-3 bg-emerald-50 border-l-4 border-emerald-500 rounded text-emerald-800 leading-normal flex items-start space-x-2 text-xs">
+              <CheckCircle2 className="w-5 h-5 shrink-0 mt-0.5 text-emerald-600" />
               <span>
-                <strong>Warning:</strong> This writes sample records into Firestore. It prepares the interface immediately for evaluator reviews.
+                <strong>Zero Mock Pollution:</strong> Danger zones and alias collections cannot be overwritten or seeded with mock test data in this portal.
               </span>
             </div>
           </div>
 
           <div className="pt-4">
-            <button
-              onClick={handleSeed}
-              disabled={seeding}
-              className="w-full py-2.5 px-4 bg-[#1E3A5F] hover:bg-[#132844] text-white font-bold uppercase tracking-wide rounded shadow transition-colors flex items-center justify-center space-x-2 disabled:opacity-55"
-            >
-              <Play className="w-4 h-4 text-yellow-400" />
-              <span>{seeding ? 'Writing Sample Datasets...' : 'Seed Demonstration Hazard Data'}</span>
-            </button>
+            <div className="w-full py-2 px-3 bg-slate-100 text-slate-500 font-medium text-xs rounded flex items-center justify-center space-x-2 border border-slate-200">
+              <Check className="w-4 h-4 text-emerald-600" />
+              <span>Demo Seeder Permanently Decommissioned</span>
+            </div>
           </div>
         </div>
 

@@ -1,7 +1,8 @@
 import React, { useRef, useEffect } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { DangerZone, IncidentReport, getResidentName, formatPhoneNumber, resolveLocationName, safeString } from '../types';
+import { DangerZone, IncidentReport, getResidentName, formatPhoneNumber, resolveLocationName, safeString, isReportConvertedToZone } from '../types';
+import { PALANAN_CENTER, PALANAN_BOUNDS, HIGH_INCIDENT_THRESHOLD, ZONE_COLOR } from '../utils/zoneConstants';
 import { Compass } from 'lucide-react';
 
 interface InteractiveMapProps {
@@ -21,34 +22,14 @@ interface InteractiveMapProps {
   createColor?: string;
 }
 
-// Center of Barangay Palanan, Makati City
-const PALANAN_CENTER: [number, number] = [14.5585, 121.0020];
-
-// Exact boundary bounds (locked map pane bounds coordinates to Barangay Palanan)
-const PALANAN_BOUNDS: L.LatLngBoundsExpression = [
-  [14.5500, 120.9930], // Southwest
-  [14.5670, 121.0110]  // Northeast
-];
-
-// Exact risk level mapping configurations as specified
+// Fallback color configurations for backwards compatibility
 const MAP_RISK_COLORS: Record<string, string> = {
-  Low: '#10B981',       // Green
-  Moderate: '#F59E0B',  // Yellow
-  High: '#F97316',      // Orange
-  Critical: '#EF4444',  // Red
-  LOW: '#10B981',       // Green
-  MEDIUM: '#F97316',    // Yellow/Orange
-  HIGH: '#EF4444'       // Red
-};
-
-const MAP_RISK_RADII: Record<string, number> = {
-  Low: 50,
-  Moderate: 100,
-  High: 150,
-  Critical: 200,
-  LOW: 50,
-  MEDIUM: 150,
-  HIGH: 300
+  Low: '#10B981',
+  Moderate: '#F59E0B',
+  High: '#F97316',
+  Critical: '#EF4444',
+  LOW: '#10B981',
+  MEDIUM: '#F97316',
 };
 
 export default function InteractiveMap({
@@ -73,12 +54,14 @@ export default function InteractiveMap({
   const creationMarkerRef = useRef<L.Marker | null>(null);
   const creationCircleRef = useRef<L.Circle | null>(null);
 
-  // Helper function to check if coordinate pair is valid
+  // Helper function to check if coordinate pair is valid (skips null, undefined, NaN, and 0,0)
   const isValidCoord = (lat: any, lng: any): boolean => {
+    if (lat === null || lat === undefined || lng === null || lng === undefined) return false;
     const nLat = Number(lat);
     const nLng = Number(lng);
-    return lat !== null && lat !== undefined && lng !== null && lng !== undefined &&
-      !isNaN(nLat) && !isNaN(nLng) && isFinite(nLat) && isFinite(nLng);
+    return !isNaN(nLat) && !isNaN(nLng) && isFinite(nLat) && isFinite(nLng) &&
+      !(nLat === 0 && nLng === 0) &&
+      nLat >= -90 && nLat <= 90 && nLng >= -180 && nLng <= 180;
   };
 
   // 1. Initialize Map once on mount
@@ -183,15 +166,15 @@ export default function InteractiveMap({
 
       creationMarkerRef.current = marker;
 
-      // Create the live preview circle around it with custom values
-      const circleHexColor = createColor || '#EF4444';
+      // Create the live preview circle around it with single shared ZONE_COLOR
+      const circleHexColor = ZONE_COLOR;
       const circle = L.circle([lat, lng], {
         radius: Number(createRadius) || 100,
         color: circleHexColor,
         fillColor: circleHexColor,
         weight: 3,
         opacity: 0.85,
-        fillOpacity: 0.35,
+        fillOpacity: 0.22,
         dashArray: '5, 5'
       }).addTo(map);
 
@@ -220,30 +203,32 @@ export default function InteractiveMap({
       : dangerZones.filter(z => z.status === 'active' && z.category === selectedCategory);
 
     activeZones.forEach(zone => {
-      if (!isValidCoord(zone.latitude, zone.longitude)) {
-        console.warn('Skipping danger zone with invalid coordinates:', zone);
+      if (zone.needsLocation || !isValidCoord(zone.latitude, zone.longitude)) {
         return;
       }
 
       const lat = Number(zone.latitude);
       const lng = Number(zone.longitude);
       const isSelected = selectedMarker?.type === 'zone' && selectedMarker?.id === zone.id;
+      const isInactive = zone.status === 'inactive' || zone.needsLocation === true;
+      const isHighIncident = (zone.crimeCount ?? 0) >= HIGH_INCIDENT_THRESHOLD;
 
-      // Extract colors & radii according to database values, falling back to risk level configurations
-      const hexColor = zone.color || MAP_RISK_COLORS[zone.riskLevel] || '#EAB308';
-      const radiusMeters = Number(zone.radius) || MAP_RISK_RADII[zone.riskLevel] || 100;
+      // Universal single color ZONE_COLOR = '#EA580C' used by all zone circles
+      const hexColor = ZONE_COLOR;
+      const radiusMeters = Number(zone.radius) || 100;
 
-      // Create Leaflet Circle for hazard area (Danger zones must NOT use random markers)
+      // Inactive & needsLocation zones use the same color, dashed and lighter
       const circle = L.circle([lat, lng], {
         radius: radiusMeters,
         color: hexColor,
         fillColor: hexColor,
-        weight: isSelected ? 4 : 2,
-        opacity: isSelected ? 0.9 : 0.7,
-        fillOpacity: 0.3
+        dashArray: isInactive ? '6, 6' : undefined,
+        weight: isSelected ? 4 : (isInactive ? 1.5 : 2),
+        opacity: isInactive ? 0.5 : (isSelected ? 0.95 : 0.85),
+        fillOpacity: isInactive ? 0.08 : 0.22
       });
 
-      // Simple click listener reports target node selection back to parent
+      // Click listener reports target node selection back to parent
       circle.on('click', (e) => {
         L.DomEvent.stopPropagation(e);
         if (onSelectMarker) {
@@ -251,34 +236,57 @@ export default function InteractiveMap({
         }
       });
 
-      // Custom high fidelity HTML popup details template as specified
       const dateString = zone.createdAt ? new Date(zone.createdAt).toLocaleDateString() : 'N/A';
-      const createdByString = safeString(zone.createdBy) || 'System Administrator';
       const resolvedLocName = resolveLocationName(zone);
+      const activeTimeText = zone.activeTime === 'night_only' 
+        ? `Night Only (${zone.startHour ?? 18}:00 - ${zone.endHour ?? 5}:00)`
+        : zone.activeTime === 'day_only'
+        ? `Day Only (${zone.startHour ?? 5}:00 - ${zone.endHour ?? 18}:00)`
+        : `All Day (24 Hours)`;
+      const sourceText = zone.source === 'barangay_data'
+        ? 'Barangay Official Data'
+        : zone.source === 'resident_report'
+        ? 'Resident Report'
+        : 'Both (Verified)';
+
+      const totalCrimes = zone.crimeCount ?? ((zone.nightCrimeCount ?? 0) + (zone.dayCrimeCount ?? 0));
 
       const popupHtml = `
         <div class="p-2.5 max-w-xs text-xs font-sans" id="popup-zone-${zone.id}">
           <div class="flex items-center space-x-1.5 font-bold border-b border-gray-100 pb-1.5 mb-1.5">
             <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: ${hexColor}"></span>
             <h4 class="font-bold text-slate-900 text-xs leading-snug">${resolvedLocName}</h4>
+            ${isHighIncident ? '<span class="ml-auto text-[9px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-200 border border-neutral-700 font-bold uppercase tracking-wider">High Incident</span>' : ''}
           </div>
           <table class="w-full text-left font-sans text-[11px] space-y-0.5">
             <tr>
-              <td class="font-bold text-slate-400 w-16 uppercase text-[9px] tracking-wider">Category:</td>
+              <td class="font-bold text-slate-400 w-20 uppercase text-[9px] tracking-wider">Category:</td>
               <td class="text-slate-800 font-medium">${safeString(zone.category)}</td>
             </tr>
             <tr>
-              <td class="font-bold text-slate-400 uppercase text-[9px] tracking-wider">Risk Level:</td>
-              <td class="font-semibold" style="color: ${hexColor}">${safeString(zone.riskLevel)} (${radiusMeters}m Zone)</td>
+              <td class="font-bold text-slate-400 uppercase text-[9px] tracking-wider">Incidents:</td>
+              <td class="font-bold text-slate-800">
+                ${totalCrimes} recorded
+                ${zone.nightCrimeCount !== undefined || zone.dayCrimeCount !== undefined ? `<span class="text-[10px] text-slate-500 font-normal"> (Night: ${zone.nightCrimeCount ?? 0}, Day: ${zone.dayCrimeCount ?? 0})</span>` : ''}
+              </td>
             </tr>
             <tr>
-              <td class="font-bold text-slate-400 uppercase text-[9px] tracking-wider">Created:</td>
-              <td class="text-slate-700 font-mono">${dateString}</td>
+              <td class="font-bold text-slate-400 uppercase text-[9px] tracking-wider">Active:</td>
+              <td class="text-slate-700 font-medium">${activeTimeText}</td>
             </tr>
             <tr>
-              <td class="font-bold text-slate-400 uppercase text-[9px] tracking-wider">By:</td>
-              <td class="text-slate-700 truncate">${createdByString}</td>
+              <td class="font-bold text-slate-400 uppercase text-[9px] tracking-wider">Source:</td>
+              <td class="text-slate-700">${sourceText}</td>
             </tr>
+            <tr>
+              <td class="font-bold text-slate-400 uppercase text-[9px] tracking-wider">Radius:</td>
+              <td class="text-slate-700 font-mono">${radiusMeters}m</td>
+            </tr>
+            ${zone.dataPeriod ? `
+            <tr>
+              <td class="font-bold text-slate-400 uppercase text-[9px] tracking-wider">Period:</td>
+              <td class="text-slate-600 text-[10px]">${safeString(zone.dataPeriod)}</td>
+            </tr>` : ''}
           </table>
           <p class="text-[11px] text-slate-600 bg-slate-50 border border-gray-200 p-2 rounded mt-2 italic max-h-16 overflow-y-auto">
             "${safeString(zone.description) || 'No safety remarks registered.'}"
@@ -286,15 +294,17 @@ export default function InteractiveMap({
         </div>
       `;
 
-      circle.bindPopup(popupHtml, { maxWidth: 280, closeButton: true });
+      circle.bindPopup(popupHtml, { maxWidth: 300, closeButton: true });
       circle.addTo(zonesGroup);
+
     });
 
-    // B. Incident pinpoints if toggle is on
+    // B. Incident pinpoints if toggle is on (excluding reports already converted to active danger zones)
     if (showReports && incidentReports.length > 0) {
-      const activeReports = selectedCategory === 'all'
+      const activeReports = (selectedCategory === 'all'
         ? incidentReports
-        : incidentReports.filter(r => r.category === selectedCategory);
+        : incidentReports.filter(r => r.category === selectedCategory)
+      ).filter(r => !isReportConvertedToZone(r, dangerZones));
 
       activeReports.forEach(report => {
         if (!isValidCoord(report.latitude, report.longitude)) {

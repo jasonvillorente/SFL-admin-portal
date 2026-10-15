@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { DangerZone, IncidentReport, UserAccount, getResidentName, formatPhoneNumber, getReportImage, resolveLocationName, safeString } from '../types';
+import { DangerZone, IncidentReport, UserAccount, getResidentName, formatPhoneNumber, getReportImage, resolveLocationName, safeString, isReportConvertedToZone } from '../types';
 import InteractiveMap from './InteractiveMap';
 import { Filter, Search, AlertTriangle, ShieldAlert, Layers, MapPin, Eye, Compass, RefreshCw, Phone, Camera } from 'lucide-react';
+import { hasValidCoordinates } from '../utils/zoneUtils';
 
 interface MapMonitoringViewProps {
   dangerZones: DangerZone[];
@@ -51,11 +52,12 @@ export default function MapMonitoringView({
     const desc = (z?.description || '').toLowerCase();
     const query = (searchQuery || '').toLowerCase();
     const matchSearch = !query || locName.includes(query) || desc.includes(query);
-    return z?.status === 'active' && matchCategory && matchSearch;
+    return z?.status === 'active' && hasValidCoordinates(z) && matchCategory && matchSearch;
   });
 
-  // Filters incident reports
+  // Filters incident reports (excluding already converted danger zones)
   const filteredReports = incidentReports.filter(r => {
+    const isGeofenced = isReportConvertedToZone(r, dangerZones);
     const matchCategory = selectedCategory === 'all' || r?.category === selectedCategory;
     const locName = (r?.locationName || '').toLowerCase();
     const desc = (r?.description || '').toLowerCase();
@@ -63,7 +65,7 @@ export default function MapMonitoringView({
     const phone = (r?.phoneNumber || r?.reporterPhone || '').toLowerCase();
     const query = (searchQuery || '').toLowerCase();
     const matchSearch = !query || locName.includes(query) || desc.includes(query) || repName.includes(query) || phone.includes(query);
-    return matchCategory && matchSearch;
+    return !isGeofenced && matchCategory && matchSearch;
   });
 
   return (

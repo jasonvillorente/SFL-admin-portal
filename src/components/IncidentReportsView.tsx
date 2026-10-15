@@ -1,5 +1,17 @@
 import React, { useState } from 'react';
-import { IncidentReport, UserAccount, getResidentName, formatPhoneNumber, getReportImage, getAllReportImages, resolveLocationName, safeString } from '../types';
+import { 
+  IncidentReport, 
+  DangerZone,
+  UserAccount, 
+  getResidentName, 
+  formatPhoneNumber, 
+  getReportImage, 
+  getAllReportImages, 
+  resolveLocationName, 
+  safeString,
+  isReportConvertedToZone,
+  getMatchingZoneForReport
+} from '../types';
 import { 
   Check, 
   X, 
@@ -24,31 +36,37 @@ import {
   Trash2,
   Sparkles,
   RefreshCw,
-  Compass
+  Compass,
+  CheckCircle2
 } from 'lucide-react';
 import ConfirmDialog from './ConfirmDialog';
 import AlertToast from './AlertToast';
 
 interface IncidentReportsViewProps {
   incidentReports: IncidentReport[];
+  dangerZones?: DangerZone[];
   users?: UserAccount[];
   onApproveReport: (id: string) => Promise<void>;
   onRejectReport: (id: string) => Promise<void>;
   onDeleteReport: (id: string) => Promise<void>;
   onPurgeTestReports?: (reportIds: string[]) => Promise<void>;
   onConvertToDangerZone: (report: IncidentReport) => void;
+  onQuickConvertToDangerZone?: (report: IncidentReport) => Promise<void>;
 }
 
 export default function IncidentReportsView({
   incidentReports,
+  dangerZones = [],
   users = [],
   onApproveReport,
   onRejectReport,
   onDeleteReport,
   onPurgeTestReports,
-  onConvertToDangerZone
+  onConvertToDangerZone,
+  onQuickConvertToDangerZone
 }: IncidentReportsViewProps) {
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [hideGeofenced, setHideGeofenced] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -108,17 +126,43 @@ export default function IncidentReportsView({
     };
   };
 
+  // Check if a report is already inputted into a danger zone
+  const isGeofenced = (rep: IncidentReport) => isReportConvertedToZone(rep, dangerZones);
+
   // Counter metrics
-  const total = incidentReports.length;
-  const pending = incidentReports.filter(r => r.status === 'pending').length;
-  const approved = incidentReports.filter(r => r.status === 'approved').length;
+  const geofencedReports = incidentReports.filter(r => isGeofenced(r));
+  const activeUngeofencedReports = incidentReports.filter(r => !isGeofenced(r) && r.status !== 'rejected');
+  
+  const totalActive = activeUngeofencedReports.length;
+  const pending = incidentReports.filter(r => !isGeofenced(r) && r.status === 'pending').length;
+  const approved = incidentReports.filter(r => !isGeofenced(r) && r.status === 'approved').length;
+  const geofencedCount = geofencedReports.length;
   const rejected = incidentReports.filter(r => r.status === 'rejected').length;
 
-  // Filter listings
+  // Filter listings: hides already geofenced reports by default unless specifically selected
   const filteredReports = incidentReports.filter(rep => {
-    const matchStatus = filterStatus === 'all' || rep?.status === filterStatus;
-    const query = (searchQuery || '').toLowerCase().trim();
+    const reportIsGeofenced = isGeofenced(rep);
+
+    // Status matching
+    let matchStatus = false;
+    if (filterStatus === 'all') {
+      // By default hide reports already inputted into danger zones
+      matchStatus = hideGeofenced ? !reportIsGeofenced : true;
+    } else if (filterStatus === 'geofenced') {
+      matchStatus = reportIsGeofenced;
+    } else if (filterStatus === 'pending') {
+      matchStatus = rep?.status === 'pending' && (!hideGeofenced || !reportIsGeofenced);
+    } else if (filterStatus === 'approved') {
+      matchStatus = rep?.status === 'approved' && (!hideGeofenced || !reportIsGeofenced);
+    } else if (filterStatus === 'rejected') {
+      matchStatus = rep?.status === 'rejected';
+    } else {
+      matchStatus = rep?.status === filterStatus;
+    }
+
     if (!matchStatus) return false;
+
+    const query = (searchQuery || '').toLowerCase().trim();
     if (!query) return true;
 
     const repInfo = resolveReporterInfo(rep);
@@ -272,12 +316,12 @@ export default function IncidentReportsView({
         </div>
       </div>
 
-      {/* Summary Indicator Metics Grid */}
+      {/* Summary Indicator Metrics Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 font-sans">
         <div className="bg-white border border-gray-200 rounded p-4 shadow-sm text-xs flex items-center justify-between">
           <div>
-            <span className="text-[10px] text-gray-400 font-bold uppercase block">TOTAL SUBMITTED REPORTS</span>
-            <span className="text-xl font-bold text-slate-900 block mt-1">{total} reports</span>
+            <span className="text-[10px] text-gray-500 font-bold uppercase block">ACTIVE CITIZEN REPORTS</span>
+            <span className="text-xl font-bold text-slate-900 block mt-1">{totalActive} active</span>
           </div>
           <div className="p-2 bg-slate-100 rounded text-slate-700">
             <ShieldAlert className="w-5 h-5" />
@@ -286,7 +330,7 @@ export default function IncidentReportsView({
 
         <div className="bg-white border border-amber-200 rounded p-4 shadow-sm text-xs flex items-center justify-between">
           <div>
-            <span className="text-[10px] text-amber-500 font-bold uppercase block">PENDING VERIFICATION</span>
+            <span className="text-[10px] text-amber-600 font-bold uppercase block">PENDING VERIFICATION</span>
             <span className="text-xl font-bold text-amber-600 block mt-1">{pending} reviews</span>
           </div>
           <div className="p-2 bg-amber-50 rounded text-amber-700">
@@ -294,13 +338,13 @@ export default function IncidentReportsView({
           </div>
         </div>
 
-        <div className="bg-white border border-emerald-200 rounded p-4 shadow-sm text-xs flex items-center justify-between">
+        <div className="bg-white border border-blue-200 rounded p-4 shadow-sm text-xs flex items-center justify-between">
           <div>
-            <span className="text-[10px] text-emerald-500 font-bold uppercase block">APPROVED INCIDENTS</span>
-            <span className="text-xl font-bold text-emerald-600 block mt-1">{approved} verified</span>
+            <span className="text-[10px] text-blue-600 font-bold uppercase block">GEOFENCED TO DANGER ZONES</span>
+            <span className="text-xl font-bold text-blue-700 block mt-1">{geofencedCount} geofenced</span>
           </div>
-          <div className="p-2 bg-emerald-50 rounded text-emerald-700">
-            <Check className="w-5 h-5" />
+          <div className="p-2 bg-blue-50 rounded text-blue-700">
+            <ShieldCheck className="w-5 h-5" />
           </div>
         </div>
 
@@ -334,21 +378,39 @@ export default function IncidentReportsView({
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
             </div>
 
-            {/* Status tab selectors */}
-            <div className="flex items-center space-x-1 border border-gray-200 p-1 bg-white rounded">
-              {['all', 'pending', 'approved', 'rejected'].map(st => (
-                <button
-                  key={st}
-                  onClick={() => setFilterStatus(st)}
-                  className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-colors ${
-                    filterStatus === st 
-                      ? 'bg-[#1E3A5F] text-white' 
-                      : 'text-slate-500 hover:bg-slate-50'
-                  }`}
-                >
-                  {st}
-                </button>
-              ))}
+            {/* Status tab selectors and hideGeofenced toggle */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center space-x-1 border border-gray-200 p-1 bg-white rounded">
+                {[
+                  { id: 'all', label: `Active (${totalActive})` },
+                  { id: 'pending', label: `Pending (${pending})` },
+                  { id: 'approved', label: `Approved (${approved})` },
+                  { id: 'geofenced', label: `Geofenced (${geofencedCount})` },
+                  { id: 'rejected', label: `Rejected (${rejected})` },
+                ].map(tab => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setFilterStatus(tab.id)}
+                    className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase transition-colors whitespace-nowrap ${
+                      filterStatus === tab.id 
+                        ? 'bg-[#1E3A5F] text-white shadow-xs' 
+                        : 'text-slate-500 hover:bg-slate-50'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              <label className="flex items-center space-x-1.5 text-[10px] font-semibold text-slate-600 select-none cursor-pointer bg-white border border-gray-200 px-2 py-1 rounded">
+                <input
+                  type="checkbox"
+                  checked={hideGeofenced}
+                  onChange={(e) => setHideGeofenced(e.target.checked)}
+                  className="rounded border-gray-300 text-[#1E3A5F] focus:ring-[#1E3A5F] w-3.5 h-3.5"
+                />
+                <span>Hide Converted</span>
+              </label>
             </div>
           </div>
 
@@ -444,17 +506,23 @@ export default function IncidentReportsView({
                         </td>
                         <td className="py-3 px-4 text-gray-500 font-mono text-[10px] whitespace-nowrap">{rep.dateSubmitted}</td>
                         <td className="py-3 px-4 whitespace-nowrap">
-                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${
-                            rep.status === 'pending' ? 'bg-amber-100 text-amber-800 border border-amber-200' :
-                            rep.status === 'approved' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' :
-                            'bg-red-100 text-red-800 border border-red-250'
-                          }`}>
-                            {rep.status}
-                          </span>
+                          {isGeofenced(rep) ? (
+                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase bg-blue-100 text-blue-800 border border-blue-200">
+                              🛡️ Geofenced
+                            </span>
+                          ) : (
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                              rep.status === 'pending' ? 'bg-amber-100 text-amber-800 border border-amber-200' :
+                              rep.status === 'approved' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' :
+                              'bg-red-100 text-red-800 border border-red-250'
+                            }`}>
+                              {rep.status}
+                            </span>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-right" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-end space-x-1.5">
-                            {rep.status === 'pending' && (
+                            {!isGeofenced(rep) && rep.status === 'pending' && (
                               <>
                                 <button
                                   type="button"
@@ -475,7 +543,7 @@ export default function IncidentReportsView({
                               </>
                             )}
 
-                            {!rep.convertedToDangerZoneId && (
+                            {!isGeofenced(rep) && (
                               <button
                                 type="button"
                                 onClick={() => handleProceedToGeofence(rep)}
@@ -487,8 +555,10 @@ export default function IncidentReportsView({
                               </button>
                             )}
 
-                            {rep.convertedToDangerZoneId && (
-                              <span className="text-[10px] text-gray-400 font-medium italic mr-1">Geofenced</span>
+                            {isGeofenced(rep) && (
+                              <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded whitespace-nowrap">
+                                ✓ In Danger Zone
+                              </span>
                             )}
 
                             {/* Quick Delete spam/test button on every row */}
@@ -527,11 +597,12 @@ export default function IncidentReportsView({
               <div className="flex items-center justify-between pb-2 border-b border-gray-150">
                 <span className="text-[9px] font-mono text-slate-400 block uppercase">Report Ref: {selectedReport.id ? selectedReport.id.slice(0, 8) : 'N/A'}</span>
                 <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded uppercase font-bold ${
+                  isGeofenced(selectedReport) ? 'bg-blue-100 text-blue-900 border border-blue-200' :
                   selectedReport.status === 'pending' ? 'bg-amber-100 text-amber-800' :
                   selectedReport.status === 'approved' ? 'bg-emerald-100 text-emerald-800' :
                   'bg-red-100 text-red-800'
                 }`}>
-                  {String(selectedReport.status || '').toUpperCase()}
+                  {isGeofenced(selectedReport) ? '🛡️ GEOFENCED' : String(selectedReport.status || '').toUpperCase()}
                 </span>
               </div>
 
@@ -690,8 +761,31 @@ export default function IncidentReportsView({
                 )}
 
                 {/* Primary Proceed to Geofence & Pinpoint Button */}
-                {!selectedReport.convertedToDangerZoneId ? (
-                  <div>
+                {!isGeofenced(selectedReport) ? (
+                  <div className="space-y-2">
+                    {onQuickConvertToDangerZone && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await onQuickConvertToDangerZone(selectedReport);
+                            setToastConfig({ 
+                              message: `Successfully converted "${resolveLocationName(selectedReport)}" into an active Danger Zone!`, 
+                              type: 'success' 
+                            });
+                          } catch (err: any) {
+                            setToastConfig({ message: `Failed to create danger zone: ${err.message}`, type: 'error' });
+                          }
+                        }}
+                        className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold tracking-wider text-xs flex items-center justify-center space-x-1.5 shadow transition-colors cursor-pointer"
+                        title="Instantly convert this citizen report into a Danger Zone with 1 click"
+                      >
+                        <ShieldCheck className="w-4 h-4 text-emerald-100" />
+                        <span>QUICK CREATE DANGER ZONE</span>
+                        <Sparkles className="w-4 h-4 text-yellow-300" />
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={() => handleProceedToGeofence(selectedReport)}
@@ -699,7 +793,7 @@ export default function IncidentReportsView({
                       title="Navigate to Danger Zone map and center on this exact reported pin point"
                     >
                       <MapPin className="w-4 h-4 text-yellow-400" />
-                      <span>PROCEED TO GEOFENCE & PINPOINT</span>
+                      <span>CUSTOMIZE GEOFENCE ON MAP</span>
                       <ArrowUpRight className="w-4 h-4 text-yellow-400" />
                     </button>
                     <p className="text-[10px] text-slate-500 italic mt-1 text-center leading-normal font-sans">
@@ -707,8 +801,26 @@ export default function IncidentReportsView({
                     </p>
                   </div>
                 ) : (
-                  <div className="p-2 bg-gray-50 border border-gray-150 rounded text-center text-gray-500 italic text-[11px]">
-                    <span>Verified incident already provisioned into an active hazard geofence.</span>
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded text-emerald-800 space-y-1">
+                    <div className="flex items-center space-x-1.5 font-bold text-xs">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      <span>Converted to Active Danger Zone</span>
+                    </div>
+                    <p className="text-[11px] text-emerald-700 leading-normal">
+                      This incident warning has already been verified and input into an active Danger Zone. Residents receive safety warnings when entering this area.
+                    </p>
+                    {(() => {
+                      const matchedZone = getMatchingZoneForReport(selectedReport, dangerZones);
+                      if (matchedZone) {
+                        return (
+                          <div className="bg-white/80 p-2 rounded border border-emerald-150 text-[10px] font-mono mt-1 space-y-0.5 text-slate-700">
+                            <div><strong>Zone:</strong> {matchedZone.locationName}</div>
+                            <div><strong>Risk Level:</strong> {matchedZone.riskLevel} ({matchedZone.radius || 150}m radius)</div>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })()}
                   </div>
                 )}
 

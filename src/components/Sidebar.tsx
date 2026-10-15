@@ -116,7 +116,7 @@ export default function Sidebar({
             <h4 className="text-xs font-semibold text-white truncate">{adminName || 'Admin Operator'}</h4>
             <div className="flex items-center space-x-1 mt-0.5">
               <ShieldCheck className="w-3 h-3 text-emerald-400 shrink-0" />
-              <p className="text-[9px] text-[#B0BCCB] font-mono truncate">{adminEmail || 'admin@palanan.gov.ph'}</p>
+              <p className="text-[9px] text-[#B0BCCB] font-mono truncate">{adminEmail || 'admin@makati.gov.ph'}</p>
             </div>
           </div>
         </div>

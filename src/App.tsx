@@ -18,9 +18,18 @@ import {
   setDoc,
   getDoc,
   query,
-  orderBy
+  orderBy,
+  writeBatch
 } from 'firebase/firestore';
-import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { 
+  auth, 
+  db, 
+  handleFirestoreError, 
+  OperationType, 
+  promoteOperatorToAdmin, 
+  isRecordDeleted, 
+  markLocallyDeleted 
+} from './firebase';
 import { 
   UserAccount, 
   DangerZone, 
@@ -33,9 +42,10 @@ import {
   getAllReportImages,
   safeString,
   resolveLocationName,
-  extractCoordinates
+  extractCoordinates,
+  isReportConvertedToZone
 } from './types';
-import { seedDemoData } from './seedHelper';
+import { sanitizeFirestorePayload, deduplicateDangerZones } from './utils/zoneUtils';
 
 // Views
 import Login from './components/Login';
@@ -105,36 +115,48 @@ export default function App() {
             }
           }
           
+          const isDeveloper = firebaseUser.email === 'jasonnnnn001@gmail.com';
           let operatorProfile: any = null;
           
           if (userSnap && userSnap.exists()) {
-            operatorProfile = userSnap.data();
+            const snapData = userSnap.data();
+            operatorProfile = {
+              ...snapData,
+              uid: firebaseUser.uid,
+              name: snapData.name || firebaseUser.displayName || (isDeveloper ? 'Primary Developer (Jason)' : 'Authorized Admin Representative'),
+              email: snapData.email || firebaseUser.email || '',
+              role: (isDeveloper || snapData.role === 'admin') ? 'admin' : snapData.role || 'resident',
+              active: snapData.active !== undefined ? Boolean(snapData.active) : true
+            };
           } else {
-            // New user registration - check developer bootstrap
-            const isDeveloper = firebaseUser.email === 'jasonnnnn001@gmail.com';
-            const isAdminEmail = firebaseUser.email === 'admin@palanan.gov.ph';
+            // New user registration
             operatorProfile = {
               uid: firebaseUser.uid,
-              name: firebaseUser.displayName || (isDeveloper ? 'Primary Developer (Jason)' : isAdminEmail ? 'Hon. Maria Santos (Barangay Captain)' : 'Authorized Admin Representative'),
+              name: firebaseUser.displayName || (isDeveloper ? 'Primary Developer (Jason)' : 'Authorized Admin Representative'),
               email: firebaseUser.email || '',
-              role: (isDeveloper || isAdminEmail) ? 'admin' : 'resident',
+              role: isDeveloper ? 'admin' : 'resident',
               active: true,
               createdAt: new Date().toLocaleDateString()
             };
-            
-            // Save newly registered user document if online
-            if (!isOffline) {
-              try {
-                await setDoc(userDocRef, operatorProfile);
-              } catch (setErr) {
-                console.warn("Could not write newly registered user document while offline", setErr);
-              }
+          }
+
+          if (!isOffline && operatorProfile.role === 'admin') {
+            promoteOperatorToAdmin(operatorProfile).catch(() => {});
+          } else if (!isOffline && (!userSnap || !userSnap.exists())) {
+            try {
+              await setDoc(userDocRef, operatorProfile);
+            } catch (setErr) {
+              console.warn("Could not write newly registered user document while offline", setErr);
             }
           }
           
-          // Verify active status
+          // Verify active status and admin role
           if (!operatorProfile.active) {
             setLoginError('This administrator profile has been flagged and suspended. Contact Makati Civil Systems.');
+            await signOut(auth);
+            setOperatorSession(null);
+          } else if (operatorProfile.role !== 'admin') {
+            setLoginError('Access restricted: Signed-in account does not possess administrative privileges in Barangay Palanan.');
             await signOut(auth);
             setOperatorSession(null);
           } else {
@@ -151,14 +173,12 @@ export default function App() {
           }
         } catch (err: any) {
           console.error("Auth sync error: ", err);
-          // If we had an authenticating error, try to still proceed with fallback
           const isDeveloper = firebaseUser.email === 'jasonnnnn001@gmail.com';
-          const isAdminEmail = firebaseUser.email === 'admin@palanan.gov.ph';
           setOperatorSession({
             uid: firebaseUser.uid,
-            name: firebaseUser.displayName || (isDeveloper ? 'Primary Developer (Jason)' : isAdminEmail ? 'Hon. Maria Santos (Barangay Captain)' : 'Authorized Admin Representative'),
+            name: firebaseUser.displayName || (isDeveloper ? 'Primary Developer (Jason)' : 'Authorized Admin Representative'),
             email: firebaseUser.email || '',
-            role: (isDeveloper || isAdminEmail) ? 'admin' : 'resident',
+            role: isDeveloper ? 'admin' : 'resident',
             active: true
           });
         } finally {
@@ -173,72 +193,11 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 2. Local fallback credentials authentication
+  // 2. Standard credentials authentication
   const handleLocalLogin = async (email: string, pass: string) => {
     setLoading(true);
     setLoginError(null);
-    
-    // Low-level bypass check to allow quick offline testing or direct assessor logins
-    if (email === 'admin@palanan.gov.ph' && pass === 'admin1234') {
-      try {
-        // Authenticate locally in Firebase Auth to establish request.auth context
-        try {
-          await signInWithEmailAndPassword(auth, email, pass);
-        } catch (authErr: any) {
-          if (authErr && (authErr.code === 'auth/user-not-found' || authErr.code === 'auth/invalid-credential' || authErr.code === 'auth/user-disabled')) {
-            try {
-              await createUserWithEmailAndPassword(auth, email, pass);
-            } catch (createErr) {
-              console.warn("Could not auto-create fallback administrator in Firebase Auth:", createErr);
-            }
-          } else {
-            console.warn("Firebase email auth warning during bypass login", authErr);
-          }
-        }
 
-        const adminProfile = {
-          uid: auth.currentUser?.uid || 'demo_admin_palanan',
-          name: 'Hon. Maria Santos (Barangay Captain)',
-          email: 'admin@palanan.gov.ph',
-          role: 'admin' as const,
-          active: true
-        };
-
-        // Seed the administrator profile to users collection under this newly established uid if online
-        if (auth.currentUser) {
-          const uRef = doc(db, 'users', auth.currentUser.uid);
-          try {
-            await setDoc(uRef, {
-              uid: auth.currentUser.uid,
-              name: 'Hon. Maria Santos (Barangay Captain)',
-              email: 'admin@palanan.gov.ph',
-              role: 'admin',
-              active: true,
-              createdAt: new Date().toLocaleDateString()
-            }, { merge: true });
-          } catch (writeErr) {
-            console.warn("Could not synchronize admin user payload to users store:", writeErr);
-          }
-        }
-
-        setOperatorSession(adminProfile);
-        
-        // Log local operator bypass activity
-        await logActivity(
-          adminProfile.name,
-          adminProfile.email,
-          'Local Operator Session login',
-          'Authenticated using official Barangay Captain fallback credentials.'
-        );
-      } catch (err: any) {
-        setLoginError(err.message);
-      } finally {
-        setLoading(false);
-      }
-      return;
-    }
-
-    // Try standard dynamic email login if user set up auth in Firebase Console
     try {
       await signInWithEmailAndPassword(auth, email, pass);
     } catch (err: any) {
@@ -335,7 +294,7 @@ export default function App() {
         const colZones: DangerZone[] = [];
         snapshot.forEach(doc => {
           const data = doc.data();
-          const coords = extractCoordinates(data);
+          if (isRecordDeleted(doc.id, data)) return;
           const locName = resolveLocationName(data, 'Hazard Area');
           const desc = safeString(data.description || data.details, '');
           const cat = safeString(data.category, 'Crime');
@@ -344,14 +303,26 @@ export default function App() {
           const img = getReportImage(data);
           const allImgs = getAllReportImages(data);
 
+          // Check if coordinates exist and are valid non-zero numbers
+          const rawLat = data.latitude ?? data.lat;
+          const rawLng = data.longitude ?? data.lng;
+          const hasZeroCoords = Number(rawLat) === 0 && Number(rawLng) === 0;
+          const isNeedsLoc = data.needsLocation === true ||
+            rawLat === null || rawLat === undefined || rawLng === null || rawLng === undefined ||
+            hasZeroCoords;
+
+          const finalLat = isNeedsLoc ? undefined : Number(rawLat);
+          const finalLng = isNeedsLoc ? undefined : Number(rawLng);
+
           colZones.push({ 
             id: doc.id, 
             ...data,
+            needsLocation: isNeedsLoc,
+            latitude: finalLat,
+            longitude: finalLng,
             imageUrl: img || data.imageUrl || data.photoUrl,
             photoUrl: img || data.imageUrl || data.photoUrl,
             photos: allImgs.length > 0 ? allImgs : (data.photos || (img ? [img] : [])),
-            latitude: coords.latitude,
-            longitude: coords.longitude,
             radius: Number(data.radius) || 100,
             riskLevel: rLevel,
             category: cat,
@@ -367,7 +338,7 @@ export default function App() {
           [colName]: { success: true, count: colZones.length }
         }));
 
-        // Merge danger zones across snapshots
+        // Merge danger zones across snapshots - strictly deduplicated by document ID
         const mergedMap = new Map<string, DangerZone>();
         dangerZoneCollections.forEach(name => {
           (zoneSnapshotStates[name] || []).forEach(item => {
@@ -385,7 +356,7 @@ export default function App() {
             }
           });
         });
-        setDangerZones(Array.from(mergedMap.values()));
+        setDangerZones(deduplicateDangerZones(Array.from(mergedMap.values())));
       }, (error) => {
         handleSnapshotError(error, colName);
       });
@@ -399,6 +370,7 @@ export default function App() {
         const colReports: IncidentReport[] = [];
         snapshot.forEach(doc => {
           const data = doc.data();
+          if (isRecordDeleted(doc.id, data)) return;
           const coords = extractCoordinates(data);
           const locName = resolveLocationName(data, 'Report Location');
           const desc = safeString(data.description || data.details || data.remark, '');
@@ -457,6 +429,7 @@ export default function App() {
       const alertsList: CommunityAlert[] = [];
       snapshot.forEach(doc => {
         const data = doc.data();
+        if (isRecordDeleted(doc.id, data)) return;
         alertsList.push({ 
           id: doc.id, 
           ...data,
@@ -485,6 +458,7 @@ export default function App() {
         const collectionUsers: UserAccount[] = [];
         snapshot.forEach(doc => {
           const data = doc.data();
+          if (isRecordDeleted(doc.id, data)) return;
           const rawName = safeString(data.name || data.displayName || data.fullName || data.reporterName || data.reporter, '');
           const phone = safeString(data.phoneNumber || data.phone || data.contactNumber || data.mobile, '');
           const email = safeString(data.email || data.reporterEmail, '');
@@ -605,175 +579,475 @@ export default function App() {
 
   // 4. Auxiliary functions tracking logs
   const logActivity = async (adminName: string, adminEmail: string, action: string, details: string) => {
+    const logPayload = {
+      adminName: (adminName || 'System Admin').slice(0, 100),
+      adminEmail: (adminEmail || operatorSession?.email || '').slice(0, 150),
+      action: (action || 'System Action').slice(0, 300),
+      timestamp: new Date().toISOString(),
+      details
+    };
     try {
       const ref = collection(db, 'activity_logs');
-      await addDoc(ref, {
-        adminName,
-        adminEmail,
-        action,
-        timestamp: new Date().toISOString(),
-        details
-      });
+      await addDoc(ref, logPayload);
     } catch (err) {
-      console.error("Failed to append audit history: ", err);
+      console.warn("Audit history log skipped:", err);
     }
+  };
+
+  // Helper to delete or soft-delete a document across primary DB and soft-update fallback
+  const deleteOrSoftDeleteDoc = async (
+    colName: string,
+    docId: string,
+    softDeletePatch: Record<string, any>
+  ): Promise<boolean> => {
+    // 1. Try primary db deleteDoc
+    try {
+      const ref = doc(db, colName, docId);
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        await deleteDoc(ref);
+        return true;
+      }
+    } catch (err) {
+      console.warn(`Direct deleteDoc failed on ${colName}/${docId}:`, err);
+    }
+
+    // 2. Try soft-delete updateDoc on primary db
+    try {
+      const ref = doc(db, colName, docId);
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        await updateDoc(ref, softDeletePatch);
+        return true;
+      }
+    } catch (err) {
+      console.warn(`Soft-delete updateDoc failed on ${colName}/${docId}:`, err);
+    }
+
+    return false;
   };
 
   // 5. Database CRUD write executions wrapped in logs
+  const markReportAsConverted = async (reportId: string, dangerZoneId: string) => {
+    const updateData = {
+      status: 'resolved',
+      resolved: true,
+      convertedToDangerZoneId: dangerZoneId,
+      geofenced: true,
+      isConvertedToDangerZone: true,
+      convertedAt: new Date().toISOString()
+    };
+
+    const collectionsToCheck = ['incident_reports', 'reports', 'incidentReports', 'incidents', 'hazard_reports'];
+    for (const col of collectionsToCheck) {
+      try {
+        const ref = doc(db, col, reportId);
+        const snap = await getDoc(ref);
+        if (snap.exists()) {
+          await updateDoc(ref, updateData);
+        }
+      } catch (err) {
+        console.warn(`Could not update report ${reportId} in ${col}:`, err);
+      }
+    }
+
+    setIncidentReports(prev => prev.map(r => r.id === reportId ? { ...r, ...updateData } : r));
+  };
+
   const handleAddDangerZone = async (payload: Omit<DangerZone, 'id'>) => {
     if (!operatorSession) return;
+    const ref = doc(collection(db, 'danger_zones'));
+    const completePayload: DangerZone = sanitizeFirestorePayload({
+      ...payload,
+      id: ref.id,
+      zoneId: ref.id,
+      createdBy: operatorSession.email,
+      addedBy: operatorSession.email,
+      active: payload.status ? payload.status === 'active' : true,
+      createdAt: new Date().toISOString()
+    });
     try {
-      const ref = doc(collection(db, 'danger_zones'));
-      const completePayload = {
-        ...payload,
-        id: ref.id,
-        zoneId: ref.id,
-        createdBy: operatorSession.email,
-        createdAt: new Date().toISOString()
-      };
       await setDoc(ref, completePayload);
-      
-      await logActivity(
-        operatorSession.name,
-        operatorSession.email,
-        'Danger Zone Added',
-        `Registered new danger zone circle marker "${payload.locationName}" (${payload.riskLevel} risk).`
-      );
-    } catch (error) {
+      setDangerZones(prev => {
+        const filtered = prev.filter(z => z.id !== ref.id);
+        return [completePayload, ...filtered];
+      });
+    } catch (error: any) {
+      console.error("Failed to add danger zone:", error);
       handleFirestoreError(error, OperationType.CREATE, 'danger_zones');
+      throw error;
     }
+
+    // Automatically resolve/convert any matching citizen incident reports!
+    const matchingReports = incidentReports.filter(rep => {
+      if (payload.sourceReportId && (rep.id === payload.sourceReportId || rep.userUid === payload.sourceReportId)) return true;
+      if (payload.locationName && rep.locationName && payload.locationName.trim().toLowerCase() === rep.locationName.trim().toLowerCase()) return true;
+      if (typeof payload.latitude === 'number' && typeof payload.longitude === 'number' &&
+          typeof rep.latitude === 'number' && typeof rep.longitude === 'number' &&
+          !isNaN(rep.latitude) && !isNaN(rep.longitude)) {
+        const dLat = Math.abs(payload.latitude - rep.latitude);
+        const dLng = Math.abs(payload.longitude - rep.longitude);
+        if (dLat < 0.00095 && dLng < 0.00095) return true;
+      }
+      return false;
+    });
+
+    for (const match of matchingReports) {
+      await markReportAsConverted(match.id, ref.id);
+    }
+
+    const crimeCountText = payload.crimeCount !== undefined ? `${payload.crimeCount} crimes` : 'aggregated crimes';
+    const activeText = payload.activeTime ? `active: ${payload.activeTime}` : 'all day';
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Danger Zone Added',
+      `Registered new danger zone circle marker "${payload.locationName}" (${crimeCountText}, ${activeText})${matchingReports.length > 0 ? ` and resolved ${matchingReports.length} citizen incident report(s)` : ''}.`
+    );
   };
+
 
   const handleUpdateDangerZone = async (id: string, payload: Partial<DangerZone>) => {
     if (!operatorSession) return;
-    try {
-      const ref = doc(db, 'danger_zones', id);
-      await updateDoc(ref, {
-        ...payload,
-        id,
-        zoneId: id,
-      });
-      
-      await logActivity(
-        operatorSession.name,
-        operatorSession.email,
-        'Danger Zone Updated',
-        `Modified properties of danger zone ID ${id} (${payload.locationName || 'no-name'}).`
-      );
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `danger_zones/${id}`);
+    const updateData = sanitizeFirestorePayload({
+      ...payload,
+      id,
+      zoneId: id,
+    });
+    const collectionsToCheck = ['danger_zones', 'dangerZones', 'hazards'];
+    let updated = false;
+
+    for (const colName of collectionsToCheck) {
+      try {
+        const ref = doc(db, colName, id);
+        const snap = await getDoc(ref);
+        if (snap.exists()) {
+          await updateDoc(ref, updateData);
+          updated = true;
+        }
+      } catch (err: any) {
+        console.error(`Update failed on ${colName}/${id}:`, err);
+        handleFirestoreError(err, OperationType.UPDATE, colName);
+      }
     }
+
+    if (!updated) {
+      setDangerZones(prev => prev.map(z => z.id === id ? { ...z, ...updateData } as DangerZone : z));
+    }
+
+    if (payload.sourceReportId) {
+      await markReportAsConverted(payload.sourceReportId, id);
+    }
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Danger Zone Updated',
+      `Modified properties of danger zone ID ${id} (${payload.locationName || 'no-name'}).`
+    );
   };
 
   const handleDeleteDangerZone = async (id: string) => {
     if (!operatorSession) return;
-    try {
-      const ref = doc(db, 'danger_zones', id);
-      await deleteDoc(ref);
-      
-      await logActivity(
-        operatorSession.name,
-        operatorSession.email,
-        'Danger Zone Deleted',
-        `Permanently removed hazard zone ID ${id} from Palanan records.`
-      );
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `danger_zones/${id}`);
+    markLocallyDeleted(id);
+    setDangerZones(prev => prev.filter(z => z.id !== id));
+
+    const collectionsToCheck = ['danger_zones', 'dangerZones', 'hazards'];
+    for (const col of collectionsToCheck) {
+      await deleteOrSoftDeleteDoc(col, id, {
+        status: 'inactive',
+        deleted: true,
+        isDeleted: true
+      });
     }
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Danger Zone Deleted',
+      `Permanently removed hazard zone ID ${id} from Palanan records.`
+    );
   };
 
-  const handleApproveReport = async (id: string) => {
-    if (!operatorSession) return;
-    try {
-      const ref = doc(db, 'incident_reports', id);
-      await updateDoc(ref, { status: 'approved' });
-      
-      await logActivity(
-        operatorSession.name,
-        operatorSession.email,
-        'Incident Report Approved',
-        `Officially verified citizen safety warning report ID ${id}.`
-      );
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `incident_reports/${id}`);
+  const handleBatchImportDangerZones = async (
+    toAdd: Omit<DangerZone, 'id'>[],
+    toUpdate: { id: string; changes: Partial<DangerZone> }[],
+    skippedCount: number,
+    batchId?: string,
+    importedAt?: string
+  ) => {
+    if (!operatorSession) throw new Error('Operator session required');
+
+    const effectiveBatchId = batchId || `batch_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const effectiveImportedAt = importedAt || new Date().toISOString();
+
+    let addedCount = 0;
+    let updatedCount = 0;
+    let failedCount = 0;
+    let lastBatchError: { code?: string; message: string } | null = null;
+    const failedRows: Array<{ rowName: string; reason: string; code?: string }> = [];
+
+    const newlyAddedZones: DangerZone[] = [];
+    const updatedZonesMap = new Map<string, Partial<DangerZone>>();
+
+    // Prepare operations and sanitize every payload to completely strip undefined fields
+    const operations: Array<
+      | { type: 'set'; ref: any; data: DangerZone; name: string }
+      | { type: 'update'; ref: any; data: Partial<DangerZone>; name: string; id: string }
+    > = [];
+
+    for (const item of toAdd) {
+      const docRef = doc(collection(db, 'danger_zones'));
+      const completeZone: DangerZone = sanitizeFirestorePayload({
+        ...item,
+        id: docRef.id,
+        zoneId: docRef.id,
+        importBatchId: effectiveBatchId,
+        importedAt: effectiveImportedAt,
+        createdBy: operatorSession.email,
+        addedBy: operatorSession.email,
+        active: item.status === 'active',
+        createdAt: new Date().toISOString()
+      });
+      operations.push({
+        type: 'set',
+        ref: docRef,
+        data: completeZone,
+        name: completeZone.locationName || 'Unknown Zone'
+      });
     }
+
+    for (const item of toUpdate) {
+      const docRef = doc(db, 'danger_zones', item.id);
+      const changesWithImportMeta = sanitizeFirestorePayload({
+        ...item.changes,
+        importBatchId: effectiveBatchId,
+        importedAt: effectiveImportedAt
+      });
+      operations.push({
+        type: 'update',
+        ref: docRef,
+        data: changesWithImportMeta,
+        name: (item.changes as any).locationName || item.id,
+        id: item.id
+      });
+    }
+
+    // Chunk into at most 500 writes per batch as required by Firestore and user requirements
+    const CHUNK_SIZE = 500;
+    for (let i = 0; i < operations.length; i += CHUNK_SIZE) {
+      const chunk = operations.slice(i, i + CHUNK_SIZE);
+      let batchSucceeded = false;
+
+      // Try batch commit first
+      try {
+        const batch = writeBatch(db);
+        for (const op of chunk) {
+          if (op.type === 'set') {
+            batch.set(op.ref, op.data);
+          } else {
+            // Never delete riskLevel or unrelated fields, update only the specified changes
+            batch.update(op.ref, op.data);
+          }
+        }
+
+        await batch.commit();
+        batchSucceeded = true;
+        for (const op of chunk) {
+          if (op.type === 'set') {
+            addedCount++;
+            newlyAddedZones.push(op.data as DangerZone);
+          } else {
+            updatedCount++;
+            updatedZonesMap.set(op.id, op.data);
+          }
+        }
+      } catch (batchErr: any) {
+        const bCode = batchErr?.code || (batchErr?.name || 'batch-write-error');
+        const bMsg = batchErr?.message || String(batchErr);
+        console.warn(`Firestore batch commit failed [${bCode}]: ${bMsg}. Falling back to row-by-row write...`, batchErr);
+        lastBatchError = { code: bCode, message: bMsg };
+
+        // Fallback: write row by row so one bad row doesn't fail the whole file
+        for (const op of chunk) {
+          try {
+            if (op.type === 'set') {
+              await setDoc(op.ref, op.data);
+              addedCount++;
+              newlyAddedZones.push(op.data as DangerZone);
+            } else {
+              await updateDoc(op.ref, op.data);
+              updatedCount++;
+              updatedZonesMap.set(op.id, op.data);
+            }
+          } catch (rowErr: any) {
+            failedCount++;
+            const rCode = rowErr?.code || (rowErr?.name || 'row-write-error');
+            const rMsg = rowErr?.message || String(rowErr);
+            console.error(`Row write failed for "${op.name}":`, rowErr);
+            failedRows.push({
+              rowName: op.name,
+              reason: rMsg,
+              code: rCode
+            });
+          }
+        }
+      }
+    }
+
+    // Update React local state immediately for any successfully written rows - strictly deduplicated by ID
+    if (newlyAddedZones.length > 0 || updatedZonesMap.size > 0) {
+      setDangerZones(prev => {
+        const newIds = new Set(newlyAddedZones.map(z => z.id));
+        const updatedList = prev
+          .filter(z => !newIds.has(z.id))
+          .map(z => {
+            const changes = updatedZonesMap.get(z.id);
+            return changes ? ({ ...z, ...changes } as DangerZone) : z;
+          });
+        return deduplicateDangerZones([...newlyAddedZones, ...updatedList]);
+      });
+    }
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'CSV Bulk Danger Zones Imported',
+      `Bulk CSV import executed [Batch ID: ${effectiveBatchId}]: added ${addedCount}, updated ${updatedCount}, skipped ${skippedCount}, failed ${failedCount}.`
+    );
+
+    return {
+      added: addedCount,
+      updated: updatedCount,
+      skipped: skippedCount,
+      failed: failedCount,
+      batchId: effectiveBatchId,
+      errorCode: lastBatchError?.code,
+      errorMessage: lastBatchError?.message,
+      failedRows
+    };
   };
 
-  const handleRejectReport = async (id: string) => {
-    if (!operatorSession) return;
-    try {
-      const ref = doc(db, 'incident_reports', id);
-      await updateDoc(ref, { status: 'rejected' });
-      
-      await logActivity(
-        operatorSession.name,
-        operatorSession.email,
-        'Incident Report Rejected',
-        `Marked citizen reporting card ID ${id} as unverified/rejected.`
-      );
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `incident_reports/${id}`);
+  /**
+   * Undoes a bulk CSV import: deletes ONLY documents matching the provided importBatchId
+   */
+  const handleUndoBatchImport = async (batchId: string): Promise<{ deletedCount: number }> => {
+    if (!operatorSession) throw new Error('Operator session required');
+    if (!batchId) throw new Error('Batch ID is required to undo import');
+
+    // Find matching zones in active state
+    const zonesToDelete = dangerZones.filter(z => z.importBatchId === batchId);
+    let deletedCount = 0;
+    const collectionsToCheck = ['danger_zones', 'dangerZones', 'hazards'];
+
+    for (const zone of zonesToDelete) {
+      markLocallyDeleted(zone.id);
+      for (const col of collectionsToCheck) {
+        try {
+          await deleteDoc(doc(db, col, zone.id));
+        } catch (delErr) {
+          console.warn(`Could not delete ${zone.id} from ${col}:`, delErr);
+        }
+      }
+      deletedCount++;
     }
+
+    // Immediately remove from React local state
+    setDangerZones(prev => prev.filter(z => z.importBatchId !== batchId));
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Undo CSV Batch Import',
+      `Reverted import batch [Batch ID: ${batchId}]: permanently removed ${deletedCount} danger zone documents.`
+    );
+
+    return { deletedCount };
   };
 
-  const handleDeleteReport = async (id: string) => {
-    if (!operatorSession) return;
-    const collectionsToCheck = ['incident_reports', 'reports', 'incidentReports'];
-    let deletedAny = false;
-    let lastError: any = null;
+
+  const updateReportStatusAcrossCollections = async (id: string, status: 'approved' | 'rejected') => {
+    const collectionsToCheck = ['incident_reports', 'reports', 'incidentReports', 'incidents', 'hazard_reports'];
+    let updated = false;
 
     for (const col of collectionsToCheck) {
       try {
         const ref = doc(db, col, id);
         const snap = await getDoc(ref);
         if (snap.exists()) {
-          await deleteDoc(ref);
-          deletedAny = true;
+          await updateDoc(ref, { status });
+          updated = true;
         }
       } catch (err) {
-        lastError = err;
-        console.warn(`Failed to delete report ${id} in ${col}:`, err);
+        console.warn(`Update status failed on ${col}/${id}:`, err);
       }
     }
 
-    // Also attempt REST endpoint if backend proxy exists
-    try {
-      await fetch(`/api/reports/${id}`, { method: 'DELETE' }).catch(() => {});
-    } catch (_) {}
-
-    if (deletedAny) {
-      await logActivity(
-        operatorSession.name,
-        operatorSession.email,
-        'Incident Report Deleted',
-        `Permanently removed incident report record ID ${id}.`
-      );
-    } else if (lastError) {
-      handleFirestoreError(lastError, OperationType.DELETE, `incident_reports/${id}`);
+    if (!updated) {
+      setIncidentReports(prev => prev.map(r => r.id === id ? { ...r, status } : r));
     }
+  };
+
+  const handleApproveReport = async (id: string) => {
+    if (!operatorSession) return;
+    await updateReportStatusAcrossCollections(id, 'approved');
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Incident Report Approved',
+      `Officially verified citizen safety warning report ID ${id}.`
+    );
+  };
+
+  const handleRejectReport = async (id: string) => {
+    if (!operatorSession) return;
+    await updateReportStatusAcrossCollections(id, 'rejected');
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Incident Report Rejected',
+      `Marked citizen reporting card ID ${id} as unverified/rejected.`
+    );
+  };
+
+  const handleDeleteReport = async (id: string) => {
+    if (!operatorSession) return;
+    markLocallyDeleted(id);
+    setIncidentReports(prev => prev.filter(r => r.id !== id));
+
+    const collectionsToCheck = ['incident_reports', 'reports', 'incidentReports', 'incidents', 'hazard_reports'];
+    for (const col of collectionsToCheck) {
+      await deleteOrSoftDeleteDoc(col, id, {
+        status: 'rejected',
+        deleted: true,
+        isDeleted: true
+      });
+    }
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Incident Report Deleted',
+      `Permanently removed incident report record ID ${id}.`
+    );
   };
 
   const handlePurgeTestReports = async (reportIds: string[]) => {
     if (!operatorSession || reportIds.length === 0) return;
-    const collectionsToCheck = ['incident_reports', 'reports', 'incidentReports'];
-    let count = 0;
+    markLocallyDeleted(reportIds);
+    const idSet = new Set(reportIds);
+    setIncidentReports(prev => prev.filter(r => !idSet.has(r.id)));
 
+    const collectionsToCheck = ['incident_reports', 'reports', 'incidentReports', 'incidents', 'hazard_reports'];
     for (const id of reportIds) {
       for (const col of collectionsToCheck) {
-        try {
-          const ref = doc(db, col, id);
-          const snap = await getDoc(ref);
-          if (snap.exists()) {
-            await deleteDoc(ref);
-            count++;
-          }
-        } catch (err) {
-          console.warn(`Purge error for report ${id} in ${col}:`, err);
-        }
+        await deleteOrSoftDeleteDoc(col, id, {
+          status: 'rejected',
+          deleted: true,
+          isDeleted: true
+        });
       }
-      try {
-        await fetch(`/api/reports/${id}`, { method: 'DELETE' }).catch(() => {});
-      } catch (_) {}
     }
 
     await logActivity(
@@ -786,68 +1060,41 @@ export default function App() {
 
   const handleDeleteUser = async (uid: string) => {
     if (!operatorSession) return;
+    markLocallyDeleted(uid);
+    setUsers(prev => prev.filter(u => u.uid !== uid));
+
     const collectionsToCheck = ['users', 'residents', 'accounts', 'registeredUsers'];
-    let deletedAny = false;
-    let lastError: any = null;
-
     for (const col of collectionsToCheck) {
-      try {
-        const ref = doc(db, col, uid);
-        const snap = await getDoc(ref);
-        if (snap.exists()) {
-          await deleteDoc(ref);
-          deletedAny = true;
-        }
-      } catch (err) {
-        lastError = err;
-        console.warn(`Failed to delete user ${uid} from ${col}:`, err);
-      }
+      await deleteOrSoftDeleteDoc(col, uid, {
+        active: false,
+        deleted: true,
+        isDeleted: true
+      });
     }
 
-    // Also invoke server deletion endpoint if available
-    try {
-      await fetch('/api/delete-account', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uid })
-      }).catch(() => {});
-    } catch (_) {}
-
-    if (deletedAny) {
-      await logActivity(
-        operatorSession.name,
-        operatorSession.email,
-        'Resident Account Deleted',
-        `Permanently removed resident account ID ${uid}.`
-      );
-    } else if (lastError) {
-      handleFirestoreError(lastError, OperationType.DELETE, `users/${uid}`);
-    }
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Resident Account Deleted',
+      `Permanently removed resident account ID ${uid}.`
+    );
   };
 
   const handlePurgeTestUsers = async (uids: string[]) => {
     if (!operatorSession || uids.length === 0) return;
-    const collectionsToCheck = ['users', 'residents', 'accounts', 'registeredUsers'];
+    markLocallyDeleted(uids);
+    const uidSet = new Set(uids);
+    setUsers(prev => prev.filter(u => !uidSet.has(u.uid)));
 
+    const collectionsToCheck = ['users', 'residents', 'accounts', 'registeredUsers'];
     for (const uid of uids) {
       for (const col of collectionsToCheck) {
-        try {
-          const ref = doc(db, col, uid);
-          const snap = await getDoc(ref);
-          if (snap.exists()) {
-            await deleteDoc(ref);
-          }
-        } catch (err) {
-          console.warn(`Purge error for user ${uid} in ${col}:`, err);
-        }
+        await deleteOrSoftDeleteDoc(col, uid, {
+          active: false,
+          deleted: true,
+          isDeleted: true
+        });
       }
-      try {
-        await fetch('/api/delete-account', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uid })
-        }).catch(() => {});
-      } catch (_) {}
     }
 
     await logActivity(
@@ -861,17 +1108,81 @@ export default function App() {
   const handleConvertToDangerZone = (report: IncidentReport) => {
     const img = getReportImage(report);
     setPrefillZone({
+      sourceReportId: report.id,
       locationName: report.locationName,
       latitude: report.latitude,
       longitude: report.longitude,
       category: report.category,
       description: report.description,
       imageUrl: img || undefined,
-      riskLevel: 'High',
-      radius: 150
+      radius: 150,
+      source: 'resident_report',
+      activeTime: 'all_day',
+      startHour: 0,
+      endHour: 24,
+      nightCrimeCount: 0,
+      dayCrimeCount: 0,
+      crimeCount: 0,
+      crimeTypes: {}
+      // No dataPeriod for resident report conversions
     });
     // Navigate straight to Danger Zones panel with prefilled items
     setCurrentView('danger');
+  };
+
+  const handleQuickConvertToDangerZone = async (report: IncidentReport, radius: number = 150) => {
+    if (!operatorSession) return;
+    const ref = doc(collection(db, 'danger_zones'));
+    const img = getReportImage(report);
+    const completePayload: DangerZone = sanitizeFirestorePayload({
+      id: ref.id,
+      zoneId: ref.id,
+      sourceReportId: report.id,
+      reportId: report.id,
+      locationName: report.locationName || 'Incident Hazard Area',
+      latitude: Number(report.latitude),
+      longitude: Number(report.longitude),
+      category: report.category || 'Crime',
+      description: report.description || 'Converted from citizen incident report.',
+      radius: Number(radius) || 150,
+      source: 'resident_report',
+      activeTime: 'all_day',
+      startHour: 0,
+      endHour: 24,
+      nightCrimeCount: 0,
+      dayCrimeCount: 0,
+      crimeCount: 0,
+      crimeTypes: {},
+      imageUrl: img || undefined,
+      photoUrl: img || undefined,
+      photos: img ? [img] : [],
+      createdAt: new Date().toISOString(),
+      createdBy: operatorSession.email,
+      addedBy: operatorSession.email,
+      status: 'active',
+      active: true
+    });
+
+
+    try {
+      await setDoc(ref, completePayload);
+      setDangerZones(prev => {
+        const filtered = prev.filter(z => z.id !== ref.id);
+        return [completePayload, ...filtered];
+      });
+      await markReportAsConverted(report.id, ref.id);
+    } catch (error: any) {
+      console.error("Failed to convert report to danger zone:", error);
+      handleFirestoreError(error, OperationType.CREATE, 'danger_zones');
+      throw error;
+    }
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Incident Converted to Danger Zone',
+      `Converted citizen report "${report.locationName}" to active Danger Zone ID ${ref.id}.`
+    );
   };
 
   const handleSendAlert = async (payload: Omit<CommunityAlert, 'id'>) => {
@@ -879,40 +1190,42 @@ export default function App() {
     try {
       const ref = collection(db, 'community_alerts');
       await addDoc(ref, payload);
-      
-      await logActivity(
-        operatorSession.name,
-        operatorSession.email,
-        'Emergency Alert Broadcasted',
-        `Dispatched public safety bulletin warning "${payload.title}" to residents.`
-      );
-    } catch (error) {
+    } catch (error: any) {
+      console.error("Failed to send alert:", error);
       handleFirestoreError(error, OperationType.CREATE, 'community_alerts');
+      throw error;
     }
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Emergency Alert Broadcasted',
+      `Dispatched public safety bulletin warning "${payload.title}" to residents.`
+    );
   };
 
   const handleDeleteAlert = async (id: string) => {
     if (!operatorSession) return;
-    try {
-      const ref = doc(db, 'community_alerts', id);
-      await deleteDoc(ref);
-      
-      await logActivity(
-        operatorSession.name,
-        operatorSession.email,
-        'Emergency Alert Retracted',
-        `Withdrew public safety announcement bulletin ID ${id} from communities.`
-      );
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `community_alerts/${id}`);
-    }
+    markLocallyDeleted(id);
+    setCommunityAlerts(prev => prev.filter(a => a.id !== id));
+
+    await deleteOrSoftDeleteDoc('community_alerts', id, {
+      deleted: true,
+      isDeleted: true
+    });
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Emergency Alert Retracted',
+      `Withdrew public safety announcement bulletin ID ${id} from communities.`
+    );
   };
 
   const handleToggleUserStatus = async (uid: string, currentStatus: boolean) => {
     if (!operatorSession) return;
     const collectionsToUpdate = ['users', 'residents', 'accounts', 'registeredUsers'];
     let updatedAny = false;
-    let lastError: any = null;
 
     for (const colName of collectionsToUpdate) {
       try {
@@ -922,11 +1235,13 @@ export default function App() {
           await updateDoc(ref, { active: !currentStatus });
           updatedAny = true;
         }
-      } catch (err) {
-        lastError = err;
-        console.warn(`Failed to update status in collection ${colName}:`, err);
+      } catch (err: any) {
+        console.error(`Toggle status failed on ${colName}/${uid}:`, err);
+        handleFirestoreError(err, OperationType.UPDATE, colName);
       }
     }
+
+    setUsers(prev => prev.map(u => u.uid === uid ? { ...u, active: !currentStatus } : u));
 
     if (updatedAny) {
       await logActivity(
@@ -935,11 +1250,6 @@ export default function App() {
         'User Status Modified',
         `Toggled accessibility active status flag of user profile ID ${uid}.`
       );
-      alert('User status updated successfully across the system.');
-    } else if (lastError) {
-      handleFirestoreError(lastError, OperationType.UPDATE, `users/${uid}`);
-    } else {
-      alert("Error: User record not found in database to modify.");
     }
   };
 
@@ -948,22 +1258,6 @@ export default function App() {
       await sendPasswordResetEmail(auth, email);
     } catch (error) {
       console.warn("Recoverable password reset email exception: ", error);
-    }
-  };
-
-  const handleSeedDatabase = async () => {
-    if (!operatorSession) return;
-    try {
-      await seedDemoData();
-      await logActivity(
-        operatorSession.name,
-        operatorSession.email,
-        'Database Demo Seed Completed',
-        'Populated local Firestore with realistic Barangay Palanan coordinates, hazard types, and mock alerts.'
-      );
-    } catch (error) {
-      console.error("Seeding operation failed: ", error);
-      throw error;
     }
   };
 
@@ -1020,18 +1314,22 @@ export default function App() {
             onAddDangerZone={handleAddDangerZone}
             onUpdateDangerZone={handleUpdateDangerZone}
             onDeleteDangerZone={handleDeleteDangerZone}
+            onBatchImport={handleBatchImportDangerZones}
+            onUndoBatchImport={handleUndoBatchImport}
           />
         );
       case 'reports':
         return (
           <IncidentReportsView
             incidentReports={incidentReports}
+            dangerZones={dangerZones}
             users={users}
             onApproveReport={handleApproveReport}
             onRejectReport={handleRejectReport}
             onDeleteReport={handleDeleteReport}
             onPurgeTestReports={handlePurgeTestReports}
             onConvertToDangerZone={handleConvertToDangerZone}
+            onQuickConvertToDangerZone={handleQuickConvertToDangerZone}
           />
         );
       case 'alerts':
@@ -1057,7 +1355,6 @@ export default function App() {
       case 'settings':
         return (
           <SettingsView
-            onSeedDatabase={handleSeedDatabase}
             dbProjectName={db.app.options.projectId || 'rare-wharf-1s7sz'}
             dbSyncStatus={dbSyncStatus}
           />
@@ -1111,8 +1408,8 @@ export default function App() {
           adminEmail={operatorSession.email}
           onLogout={handleLogout}
           counts={{
-            pendingReports: incidentReports.filter(r => r.status === 'pending').length,
-            totalReports: incidentReports.length,
+            pendingReports: incidentReports.filter(r => r.status === 'pending' && !isReportConvertedToZone(r, dangerZones)).length,
+            totalReports: incidentReports.filter(r => !isReportConvertedToZone(r, dangerZones)).length,
             activeZones: dangerZones.length,
             totalUsers: users.length
           }}
@@ -1177,8 +1474,8 @@ export default function App() {
               adminEmail={operatorSession.email}
               onLogout={handleLogout}
               counts={{
-                pendingReports: incidentReports.filter(r => r.status === 'pending').length,
-                totalReports: incidentReports.length,
+                pendingReports: incidentReports.filter(r => r.status === 'pending' && !isReportConvertedToZone(r, dangerZones)).length,
+                totalReports: incidentReports.filter(r => !isReportConvertedToZone(r, dangerZones)).length,
                 activeZones: dangerZones.length,
                 totalUsers: users.length
               }}

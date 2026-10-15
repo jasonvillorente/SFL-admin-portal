@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Shield, Eye, EyeOff, Lock, User, Info, Building } from 'lucide-react';
+import { Shield, Eye, EyeOff, Lock, User, Building } from 'lucide-react';
 
 interface LoginProps {
   onLogin: (email: string, pass: string) => Promise<void>;
@@ -12,7 +12,6 @@ export default function Login({ onLogin, onGoogleLogin, errorMsg, loading }: Log
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [useInstructions, setUseInstructions] = useState(true);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -94,7 +93,7 @@ export default function Login({ onLogin, onGoogleLogin, errorMsg, loading }: Log
                 <input
                   type="text"
                   required
-                  placeholder="admin@palanan.gov.ph"
+                  placeholder="operator@makati.gov.ph"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:border-[#1E3A5F] focus:ring-1 focus:ring-[#1E3A5F] pl-9"
@@ -192,28 +191,6 @@ export default function Login({ onLogin, onGoogleLogin, errorMsg, loading }: Log
               This system logs, timestamps, and audits every hazard registration and database touch. Unauthorized ingress attempts will automatically register with Makati City Civil Security.
             </div>
           </div>
-
-          {/* Static account assistance tooltip for reviewers */}
-          {useInstructions && (
-            <div className="mt-4 p-3 bg-slate-50 border border-slate-200 rounded text-xs text-slate-700 relative">
-              <button 
-                onClick={() => setUseInstructions(false)} 
-                className="absolute right-2 top-1 text-[10px] font-bold text-slate-400 hover:text-slate-600"
-              >
-                ✕
-              </button>
-              <h4 className="font-bold flex items-center mb-0.5 text-[#1E3A5F]">
-                <Info className="w-3.5 h-3.5 mr-1 shrink-0" />
-                DEMO LOGIN ACCESS
-              </h4>
-              <p className="mt-0.5 text-slate-600">You can sign in immediately using:</p>
-              <ul className="list-disc list-inside mt-0.5 font-mono text-[10px] space-y-0.5 bg-white p-1.5 rounded border border-slate-100">
-                <li>Operator Email: <strong className="font-sans text-slate-900">admin@palanan.gov.ph</strong></li>
-                <li>Password: <strong className="font-sans text-slate-900">admin1234</strong></li>
-              </ul>
-              <p className="mt-1.5 text-[10px] text-slate-550">Alternatively, if logged with Google Account matching bootstrapping email (<strong className="font-mono text-[9px]">jasonnnnn001@gmail.com</strong>), you automatically acquire high levels of administration privilege.</p>
-            </div>
-          )}
         </div>
       </div>
     </div>

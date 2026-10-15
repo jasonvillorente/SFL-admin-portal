@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { getFirestore, doc, setDoc } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 // Dynamically check if the administrator has applied a custom Database Link in local storage
@@ -34,7 +34,61 @@ if (forceDefault) {
 
 const app = initializeApp(activeConfig);
 export const db = getFirestore(app, activeConfig.firestoreDatabaseId || undefined); /* CRITICAL: The app will break without this line */
-export const auth = getAuth();
+export const auth = getAuth(app);
+
+export async function promoteOperatorToAdmin(profile: {
+  uid: string;
+  name: string;
+  email: string;
+  createdAt?: string;
+}): Promise<void> {
+  const payload = {
+    uid: profile.uid,
+    name: (profile.name || 'Authorized Administrator').slice(0, 120),
+    email: (profile.email || '').slice(0, 150),
+    role: 'admin',
+    active: true,
+    createdAt: profile.createdAt || new Date().toLocaleDateString()
+  };
+
+  await setDoc(doc(db, 'users', profile.uid), payload, { merge: true });
+}
+
+const DELETED_IDS_STORAGE_KEY = 'saferoute_deleted_ids_v1';
+
+export function getLocallyDeletedIds(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const raw = localStorage.getItem(DELETED_IDS_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+export function markLocallyDeleted(ids: string | string[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const current = getLocallyDeletedIds();
+    const list = Array.isArray(ids) ? ids : [ids];
+    list.forEach(id => {
+      if (id) current.add(id);
+    });
+    localStorage.setItem(DELETED_IDS_STORAGE_KEY, JSON.stringify(Array.from(current)));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function isRecordDeleted(id: string, data?: any): boolean {
+  if (!id) return false;
+  if (data && (data.deleted === true || data.isDeleted === true || data.status === 'deleted')) {
+    return true;
+  }
+  return getLocallyDeletedIds().has(id);
+}
 
 export enum OperationType {
   CREATE = 'create',
