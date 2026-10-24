@@ -36,6 +36,8 @@ import {
   IncidentReport, 
   CommunityAlert, 
   ActivityLog, 
+  CommunitySpot,
+  normalizeCommunitySpot,
   formatPhoneNumber,
   getResidentName,
   getReportImage,
@@ -55,6 +57,7 @@ import MapMonitoringView from './components/MapMonitoringView';
 import DangerZoneView from './components/DangerZoneView';
 import IncidentReportsView from './components/IncidentReportsView';
 import CommunityAlertsView from './components/CommunityAlertsView';
+import CommunitySpotsView from './components/CommunitySpotsView';
 import UsersView from './components/UsersView';
 import ActivityLogsView from './components/ActivityLogsView';
 import SettingsView from './components/SettingsView';
@@ -82,6 +85,7 @@ export default function App() {
   const [communityAlerts, setCommunityAlerts] = useState<CommunityAlert[]>([]);
   const [users, setUsers] = useState<UserAccount[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
+  const [communitySpots, setCommunitySpots] = useState<CommunitySpot[]>([]);
 
   // Firestore sync track logs for direct portal diagnosis
   const [dbSyncStatus, setDbSyncStatus] = useState<Record<string, { success: boolean; count?: number; error?: string }>>({});
@@ -568,12 +572,55 @@ export default function App() {
       handleSnapshotError(error, 'activity_logs');
     });
 
+    // F. Sync Community Spots across both collection aliases (community_spots and communitySpots)
+    const spotCollections = ['community_spots', 'communitySpots'];
+    const spotSnapshotStates: Record<string, CommunitySpot[]> = {};
+    const spotUnsubs = spotCollections.map(colName => {
+      return onSnapshot(collection(db, colName), (snapshot) => {
+        const colSpots: CommunitySpot[] = [];
+        snapshot.forEach(docSnap => {
+          const data = docSnap.data();
+          if (isRecordDeleted(docSnap.id, data)) return;
+          colSpots.push(normalizeCommunitySpot(data, docSnap.id));
+        });
+        spotSnapshotStates[colName] = colSpots;
+        setDbSyncStatus(prev => ({
+          ...prev,
+          [colName]: { success: true, count: colSpots.length }
+        }));
+
+        // Merge community spots across snapshots - strictly deduplicated by document ID
+        const mergedMap = new Map<string, CommunitySpot>();
+        spotCollections.forEach(name => {
+          (spotSnapshotStates[name] || []).forEach(item => {
+            const existing = mergedMap.get(item.id);
+            if (!existing) {
+              mergedMap.set(item.id, item);
+            } else {
+              mergedMap.set(item.id, {
+                ...existing,
+                ...item,
+                photoUrls: (item.photoUrls && item.photoUrls.length > 0) ? item.photoUrls : existing.photoUrls,
+                photos: (item.photos && item.photos.length > 0) ? item.photos : existing.photos,
+                approvedByAdmin: item.approvedByAdmin || existing.approvedByAdmin,
+                active: item.active !== undefined ? item.active : existing.active
+              });
+            }
+          });
+        });
+        setCommunitySpots(Array.from(mergedMap.values()));
+      }, (error) => {
+        handleSnapshotError(error, colName);
+      });
+    });
+
     return () => {
       zoneUnsubs.forEach(u => u());
       reportUnsubs.forEach(u => u());
       unsubAlerts();
       unsubUsers();
       unsubLogs();
+      spotUnsubs.forEach(u => u());
     };
   }, [operatorSession]);
 
@@ -1261,6 +1308,170 @@ export default function App() {
     }
   };
 
+  // Community Spots Action Handlers
+  const handleApproveCommunitySpot = async (id: string) => {
+    if (!operatorSession) return;
+    const approvalPatch = {
+      status: 'approved',
+      active: true,
+      approvedByAdmin: true,
+      reviewedBy: operatorSession.email,
+      updatedAt: new Date().toISOString()
+    };
+
+    const targetCols = ['community_spots', 'communitySpots'];
+    for (const colName of targetCols) {
+      try {
+        const ref = doc(db, colName, id);
+        await setDoc(ref, approvalPatch, { merge: true });
+      } catch (err: any) {
+        console.warn(`Approval write on ${colName}/${id} fallback:`, err);
+        try {
+          const ref = doc(db, colName, id);
+          await updateDoc(ref, approvalPatch);
+        } catch (innerErr) {
+          console.error(`Approval updateDoc failed on ${colName}/${id}:`, innerErr);
+        }
+      }
+    }
+
+    setCommunitySpots(prev => prev.map(s => s.id === id ? {
+      ...s,
+      status: 'approved',
+      active: true,
+      approvedByAdmin: true
+    } : s));
+
+    const spot = communitySpots.find(s => s.id === id);
+    const spotName = spot?.title || spot?.name || id;
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Community Spot Approved',
+      `Approved community spot "${spotName}" (ID: ${id}) for municipal safety map display.`
+    );
+  };
+
+  const handleRejectCommunitySpot = async (id: string, reason?: string) => {
+    if (!operatorSession) return;
+    const rejectionPatch = {
+      status: 'rejected',
+      active: false,
+      approvedByAdmin: false,
+      rejectionReason: reason || 'Declined by administrator',
+      reviewedBy: operatorSession.email,
+      updatedAt: new Date().toISOString()
+    };
+
+    const targetCols = ['community_spots', 'communitySpots'];
+    for (const colName of targetCols) {
+      try {
+        const ref = doc(db, colName, id);
+        await setDoc(ref, rejectionPatch, { merge: true });
+      } catch (err: any) {
+        console.warn(`Rejection write on ${colName}/${id} fallback:`, err);
+        try {
+          const ref = doc(db, colName, id);
+          await updateDoc(ref, rejectionPatch);
+        } catch (innerErr) {
+          console.error(`Rejection updateDoc failed on ${colName}/${id}:`, innerErr);
+        }
+      }
+    }
+
+    setCommunitySpots(prev => prev.map(s => s.id === id ? {
+      ...s,
+      status: 'rejected',
+      active: false,
+      approvedByAdmin: false
+    } : s));
+
+    const spot = communitySpots.find(s => s.id === id);
+    const spotName = spot?.title || spot?.name || id;
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Community Spot Rejected',
+      `Rejected community spot submission "${spotName}" (ID: ${id})${reason ? `: ${reason}` : ''}.`
+    );
+  };
+
+  const handleDeleteCommunitySpot = async (id: string) => {
+    if (!operatorSession) return;
+    markLocallyDeleted(id);
+    setCommunitySpots(prev => prev.filter(s => s.id !== id));
+
+    const targetCols = ['community_spots', 'communitySpots'];
+    for (const colName of targetCols) {
+      await deleteOrSoftDeleteDoc(colName, id, {
+        deleted: true,
+        isDeleted: true,
+        active: false,
+        updatedAt: new Date().toISOString()
+      });
+    }
+
+    const spot = communitySpots.find(s => s.id === id);
+    const spotName = spot?.title || spot?.name || id;
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Community Spot Deleted',
+      `Permanently removed community spot record "${spotName}" (ID: ${id}) from the database.`
+    );
+  };
+
+  const handleAddCommunitySpot = async (payload: Omit<CommunitySpot, 'id'>) => {
+    if (!operatorSession) return;
+    const newRef = doc(collection(db, 'community_spots'));
+    const spotId = newRef.id;
+
+    const lat = Number(payload.location?.lat ?? payload.latitude ?? 0);
+    const lng = Number(payload.location?.lng ?? payload.longitude ?? 0);
+
+    const completePayload: CommunitySpot = {
+      id: spotId,
+      title: payload.title,
+      name: payload.title,
+      description: payload.description || '',
+      category: payload.category || 'well_lit',
+      location: { lat, lng },
+      latitude: lat,
+      longitude: lng,
+      status: 'approved',
+      active: true,
+      approvedByAdmin: true,
+      upvotes: 0,
+      votedUsers: [],
+      reporterId: operatorSession.uid,
+      reporterName: operatorSession.name,
+      createdAt: new Date().toISOString(),
+      photoUrls: payload.photoUrls || [],
+      address: payload.address || ''
+    };
+
+    const targetCols = ['community_spots', 'communitySpots'];
+    for (const colName of targetCols) {
+      try {
+        await setDoc(doc(db, colName, spotId), completePayload);
+      } catch (err) {
+        console.error(`Failed to add community spot to ${colName}:`, err);
+      }
+    }
+
+    setCommunitySpots(prev => [completePayload, ...prev.filter(s => s.id !== spotId)]);
+
+    await logActivity(
+      operatorSession.name,
+      operatorSession.email,
+      'Community Spot Added',
+      `Registered official community spot "${payload.title}" (${payload.category}) at [${lat.toFixed(4)}, ${lng.toFixed(4)}].`
+    );
+  };
+
   // Select marker helper callback
   const handleSelectMarker = (marker: { type: 'zone' | 'report'; id: string } | null) => {
     setSelectedMarker(marker);
@@ -1290,9 +1501,20 @@ export default function App() {
             dangerZones={dangerZones}
             incidentReports={incidentReports}
             communityAlerts={communityAlerts}
+            communitySpots={communitySpots}
             usersCount={getCountsObj()}
             recentLogs={activityLogs}
             onNavigateToView={handleNavigateToView}
+          />
+        );
+      case 'spots':
+        return (
+          <CommunitySpotsView
+            spots={communitySpots}
+            onApprove={handleApproveCommunitySpot}
+            onReject={handleRejectCommunitySpot}
+            onDelete={handleDeleteCommunitySpot}
+            onAddSpot={handleAddCommunitySpot}
           />
         );
       case 'map':
@@ -1411,7 +1633,9 @@ export default function App() {
             pendingReports: incidentReports.filter(r => r.status === 'pending' && !isReportConvertedToZone(r, dangerZones)).length,
             totalReports: incidentReports.filter(r => !isReportConvertedToZone(r, dangerZones)).length,
             activeZones: dangerZones.length,
-            totalUsers: users.length
+            totalUsers: users.length,
+            pendingSpots: communitySpots.filter(s => (s.status || 'pending').toLowerCase() === 'pending').length,
+            totalSpots: communitySpots.length
           }}
         />
       </div>
@@ -1477,7 +1701,9 @@ export default function App() {
                 pendingReports: incidentReports.filter(r => r.status === 'pending' && !isReportConvertedToZone(r, dangerZones)).length,
                 totalReports: incidentReports.filter(r => !isReportConvertedToZone(r, dangerZones)).length,
                 activeZones: dangerZones.length,
-                totalUsers: users.length
+                totalUsers: users.length,
+                pendingSpots: communitySpots.filter(s => (s.status || 'pending').toLowerCase() === 'pending').length,
+                totalSpots: communitySpots.length
               }}
             />
             {/* Click off closer trigger */}

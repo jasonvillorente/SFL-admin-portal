@@ -509,3 +509,156 @@ export function getAllReportImages(report: any): string[] {
   }
   return results;
 }
+
+export type CommunitySpotCategory = 
+  | 'well_lit' 
+  | 'safe_haven' 
+  | 'friendly_business' 
+  | 'community_hub' 
+  | 'enjoyed_spot';
+
+export type CommunitySpotStatus = 'pending' | 'approved' | 'rejected';
+
+export interface CommunitySpotLocation {
+  lat: number;
+  lng: number;
+}
+
+export interface CommunitySpot {
+  id: string;
+  title: string;
+  name?: string;
+  description?: string;
+  category: CommunitySpotCategory | string;
+  location: CommunitySpotLocation;
+  latitude?: number;
+  longitude?: number;
+  status: CommunitySpotStatus | string;
+  active: boolean;
+  approvedByAdmin: boolean;
+  upvotes: number;
+  votedUsers: string[];
+  reporterId?: string;
+  reporterName?: string;
+  createdAt?: any;
+  photoUrls?: string[];
+  photos?: string[];
+  address?: string;
+  deleted?: boolean;
+  isDeleted?: boolean;
+  updatedAt?: any;
+}
+
+export const COMMUNITY_SPOT_CATEGORIES: {
+  id: CommunitySpotCategory;
+  label: string;
+  description: string;
+  badgeBg: string;
+  badgeText: string;
+  markerColor: string;
+}[] = [
+  {
+    id: 'well_lit',
+    label: 'Well-Lit Area',
+    description: 'Brightly lit streets, walkways, and public spaces',
+    badgeBg: 'bg-amber-100',
+    badgeText: 'text-amber-800',
+    markerColor: '#F59E0B'
+  },
+  {
+    id: 'safe_haven',
+    label: 'Safe Haven',
+    description: 'Verified safe points, security stations, or emergency assistance',
+    badgeBg: 'bg-emerald-100',
+    badgeText: 'text-emerald-800',
+    markerColor: '#10B981'
+  },
+  {
+    id: 'friendly_business',
+    label: 'Friendly Business',
+    description: 'Supportive local establishments, stores, or helpful staff',
+    badgeBg: 'bg-blue-100',
+    badgeText: 'text-blue-800',
+    markerColor: '#3B82F6'
+  },
+  {
+    id: 'community_hub',
+    label: 'Community Hub',
+    description: 'Barangay halls, active plazas, or designated gathering hubs',
+    badgeBg: 'bg-purple-100',
+    badgeText: 'text-purple-800',
+    markerColor: '#8B5CF6'
+  },
+  {
+    id: 'enjoyed_spot',
+    label: 'Enjoyed Spot',
+    description: 'Pleasant, well-maintained spots appreciated by neighborhood residents',
+    badgeBg: 'bg-rose-100',
+    badgeText: 'text-rose-800',
+    markerColor: '#F43F5E'
+  }
+];
+
+/**
+ * Normalizes community spot data from Firestore snapshots.
+ * Implements fallback rules:
+ * - Read title with fallback to name
+ * - Coordinates from location.lat/lng with fallback to latitude/longitude
+ * - Treat missing photoUrls as empty array []
+ * - Treat missing approvedByAdmin as false
+ */
+export function normalizeCommunitySpot(data: any, id: string): CommunitySpot {
+  const title = String(data?.title || data?.name || 'Untitled Spot').trim();
+
+  let lat = 0;
+  let lng = 0;
+  if (data?.location && typeof data.location === 'object') {
+    lat = Number(data.location.lat ?? data.location.latitude ?? 0);
+    lng = Number(data.location.lng ?? data.location.longitude ?? 0);
+  }
+  if ((!lat || isNaN(lat)) && (!lng || isNaN(lng))) {
+    lat = Number(data?.latitude ?? data?.lat ?? 0);
+    lng = Number(data?.longitude ?? data?.lng ?? 0);
+  }
+
+  let photoUrls: string[] = [];
+  if (Array.isArray(data?.photoUrls)) {
+    photoUrls = data.photoUrls.filter((u: any) => typeof u === 'string' && u.trim().length > 0);
+  } else if (Array.isArray(data?.photos)) {
+    photoUrls = data.photos.filter((u: any) => typeof u === 'string' && u.trim().length > 0);
+  } else if (typeof data?.photoUrl === 'string' && data.photoUrl.trim()) {
+    photoUrls = [data.photoUrl.trim()];
+  } else if (typeof data?.imageUrl === 'string' && data.imageUrl.trim()) {
+    photoUrls = [data.imageUrl.trim()];
+  }
+
+  const approvedByAdmin = Boolean(data?.approvedByAdmin);
+  const active = Boolean(data?.active);
+  const rawStatus = String(data?.status || '').toLowerCase();
+  const status: CommunitySpotStatus = 
+    rawStatus === 'approved' ? 'approved' : 
+    rawStatus === 'rejected' ? 'rejected' : 'pending';
+
+  return {
+    ...data,
+    id,
+    title,
+    name: data?.name || title,
+    description: typeof data?.description === 'string' ? data.description : (typeof data?.details === 'string' ? data.details : ''),
+    category: data?.category || 'well_lit',
+    location: { lat, lng },
+    latitude: lat,
+    longitude: lng,
+    status,
+    active,
+    approvedByAdmin,
+    upvotes: Number(data?.upvotes) || 0,
+    votedUsers: Array.isArray(data?.votedUsers) ? data.votedUsers : [],
+    reporterId: data?.reporterId || '',
+    reporterName: data?.reporterName || 'Resident',
+    createdAt: data?.createdAt || null,
+    photoUrls,
+    address: typeof data?.address === 'string' ? data.address : ''
+  };
+}
+

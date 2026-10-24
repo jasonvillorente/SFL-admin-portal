@@ -10,9 +10,10 @@ import {
   ArrowRight,
   Shield,
   Clock,
-  MapPin
+  MapPin,
+  Sparkles
 } from 'lucide-react';
-import { DangerZone, IncidentReport, CommunityAlert, ActivityLog, isReportConvertedToZone } from '../types';
+import { DangerZone, IncidentReport, CommunityAlert, ActivityLog, CommunitySpot, isReportConvertedToZone } from '../types';
 import { HIGH_INCIDENT_THRESHOLD } from '../utils/zoneConstants';
 import InteractiveMap from './InteractiveMap';
 
@@ -20,6 +21,7 @@ interface DashboardViewProps {
   dangerZones: DangerZone[];
   incidentReports: IncidentReport[];
   communityAlerts: CommunityAlert[];
+  communitySpots?: CommunitySpot[];
   usersCount: { residents: number; admins: number };
   recentLogs: ActivityLog[];
   onNavigateToView: (view: string) => void;
@@ -29,6 +31,7 @@ export default function DashboardView({
   dangerZones,
   incidentReports,
   communityAlerts,
+  communitySpots = [],
   usersCount,
   recentLogs,
   onNavigateToView
@@ -40,10 +43,11 @@ export default function DashboardView({
     z => ((z.crimeCount ?? ((z.nightCrimeCount ?? 0) + (z.dayCrimeCount ?? 0))) >= HIGH_INCIDENT_THRESHOLD) && z.status === 'active'
   ).length;
   const pendingReportsCount = incidentReports.filter(r => r.status === 'pending' && !isReportConvertedToZone(r, dangerZones)).length;
+  const pendingSpotsCount = communitySpots.filter(s => (s.status || 'pending').toLowerCase() === 'pending').length;
   const totalResidentsCount = usersCount.residents;
 
   // Render quick metric card definitions:
-  // Registered Users, Active Danger Zones, High Incident Zones, Recent Reports
+  // Registered Users, Active Danger Zones, High Incident Zones, Community Spots, Incident Reports
   const metrics = [
     {
       id: 'users',
@@ -70,6 +74,14 @@ export default function DashboardView({
       icon: AlertTriangle,
       color: 'text-red-650 bg-red-50 border-red-200',
       description: `Zones with ≥ ${HIGH_INCIDENT_THRESHOLD} reported crimes`
+    },
+    {
+      id: 'spots',
+      label: 'Community Spots',
+      value: pendingSpotsCount > 0 ? `${pendingSpotsCount} Pending` : `${communitySpots.length} Total`,
+      icon: Sparkles,
+      color: pendingSpotsCount > 0 ? 'text-amber-600 bg-amber-50 border-amber-200' : 'text-emerald-600 bg-emerald-50 border-emerald-200',
+      description: pendingSpotsCount > 0 ? `${pendingSpotsCount} submissions awaiting approval` : 'Safe havens & community spots'
     },
     {
       id: 'reports',
@@ -185,9 +197,22 @@ export default function DashboardView({
                   {dangerZones.filter(z => (z.riskLevel === 'HIGH' || z.riskLevel === 'High' || z.riskLevel === 'Critical') && z.status === 'active').length}
                 </span>
               </div>
-              <div className="bg-slate-50 p-2.5 rounded border border-gray-100">
+              <div 
+                className="bg-slate-50 p-2.5 rounded border border-gray-100 cursor-pointer hover:bg-amber-50 transition-colors"
+                onClick={() => onNavigateToView('reports')}
+              >
                 <span className="text-[9px] text-gray-500 block">PENDING CITIZEN REPORTS</span>
                 <span className="text-sm font-bold text-amber-600 block mt-0.5">{pendingReportsCount} Reports</span>
+              </div>
+              <div 
+                className="bg-slate-50 p-2.5 rounded border border-gray-100 cursor-pointer hover:bg-amber-50 transition-colors col-span-2 flex items-center justify-between"
+                onClick={() => onNavigateToView('spots')}
+              >
+                <div>
+                  <span className="text-[9px] text-gray-500 block">COMMUNITY SPOTS QUEUE</span>
+                  <span className="text-sm font-bold text-amber-600 block mt-0.5">{pendingSpotsCount} Spots Awaiting Review</span>
+                </div>
+                <span className="text-[10px] font-sans font-bold text-[#1E3A5F] hover:underline">Review &rarr;</span>
               </div>
             </div>
           </div>

@@ -10,7 +10,8 @@ import {
   Settings, 
   LogOut,
   ShieldCheck,
-  Building2
+  Building2,
+  MapPin
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -24,6 +25,8 @@ interface SidebarProps {
     totalReports?: number;
     activeZones?: number;
     totalUsers?: number;
+    pendingSpots?: number;
+    totalSpots?: number;
   };
 }
 
@@ -51,6 +54,13 @@ export default function Sidebar({
       icon: AlertTriangle,
       badge: counts?.activeZones !== undefined && counts.activeZones > 0 ? String(counts.activeZones) : undefined,
       badgeColor: 'bg-amber-800/80 text-amber-200'
+    },
+    { 
+      id: 'spots', 
+      label: 'Community Spots', 
+      icon: MapPin,
+      badge: counts?.pendingSpots !== undefined && counts.pendingSpots > 0 ? `${counts.pendingSpots} pending` : undefined,
+      badgeColor: 'bg-amber-500 text-slate-900 font-bold'
     },
     { 
       id: 'reports', 
