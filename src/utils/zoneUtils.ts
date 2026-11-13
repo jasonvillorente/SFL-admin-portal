@@ -144,6 +144,77 @@ export function getDefaultHoursForActiveTime(
 }
 
 /**
+ * Extracts the current hour (0-23) and minute (0-59) in Asia/Manila timezone.
+ */
+export function getManilaTimeParts(date: Date = new Date()): { hour: number; minute: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Manila',
+    hour: 'numeric',
+    minute: 'numeric',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+
+  const hourStr = parts.find(p => p.type === 'hour')?.value ?? '0';
+  const minuteStr = parts.find(p => p.type === 'minute')?.value ?? '0';
+
+  return {
+    hour: parseInt(hourStr, 10) % 24,
+    minute: parseInt(minuteStr, 10) % 60
+  };
+}
+
+/**
+ * Evaluates whether a given Manila hour (0-23) is inside the zone's active window.
+ * Matches mobile app logic:
+ * - 'all_day' (or unspecified) is always active
+ * - Half-open [startHour, endHour) with midnight wrap when startHour > endHour
+ */
+export function isHourInActiveWindow(
+  hour: number,
+  activeTime?: string,
+  startHour?: number,
+  endHour?: number
+): boolean {
+  if (!activeTime || activeTime === 'all_day') {
+    return true;
+  }
+
+  const fallback = activeTime === 'night_only' ? DEFAULT_NIGHT_HOURS : DEFAULT_DAY_HOURS;
+  const start = typeof startHour === 'number' && !isNaN(startHour) ? startHour : fallback.startHour;
+  const end = typeof endHour === 'number' && !isNaN(endHour) ? endHour : fallback.endHour;
+
+  if (start < end) {
+    return hour >= start && hour < end;
+  }
+  if (start > end) {
+    return hour >= start || hour < end;
+  }
+  return false;
+}
+
+export type ZoneWindowBadgeState = 'needs_location' | 'inactive' | 'active_now' | 'outside_window';
+
+/**
+ * Resolves the display-only badge state for a Danger Zone row using Manila time.
+ * Priority: needsLocation > status === 'inactive' > active window check.
+ */
+export function getZoneWindowBadgeState(
+  zone: Pick<DangerZone, 'status' | 'needsLocation' | 'activeTime' | 'startHour' | 'endHour'>,
+  now: Date = new Date()
+): ZoneWindowBadgeState {
+  if (zone.needsLocation === true) {
+    return 'needs_location';
+  }
+  if (zone.status === 'inactive') {
+    return 'inactive';
+  }
+  const { hour } = getManilaTimeParts(now);
+  return isHourInActiveWindow(hour, zone.activeTime, zone.startHour, zone.endHour)
+    ? 'active_now'
+    : 'outside_window';
+}
+
+/**
  * Parses a string of crime types formatted like "theft:3;snatching:2" or comma-delimited
  */
 export function parseCrimeTypesString(input: string): Record<string, number> {

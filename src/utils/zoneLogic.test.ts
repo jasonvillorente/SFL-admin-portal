@@ -20,7 +20,10 @@ import {
   findLikelyDuplicate,
   sanitizeFirestorePayload,
   deduplicateDangerZones,
-  hasValidCoordinates
+  hasValidCoordinates,
+  getManilaTimeParts,
+  isHourInActiveWindow,
+  getZoneWindowBadgeState
 } from './zoneUtils';
 import {
   STUDY_AREA_BOUNDS,
@@ -418,6 +421,46 @@ console.log('\nTest Suite 12: Coordinate Omission & Validation');
   // calculateDistanceMeters skips (0, 0)
   const distWithZero = calculateDistanceMeters(0, 0, 14.5585, 121.0020);
   assert(distWithZero === Infinity, 'calculateDistanceMeters with (0, 0) returns Infinity (skipped)');
+}
+
+// 13. Manila Time Active Window Badges (Half-open [start, end), midnight wrap, all_day, priority)
+console.log('\nTest Suite 13: Manila Time Active Window & Badge Priority');
+{
+  const at1759 = new Date('2026-11-13T17:59:00+08:00');
+  const at1800 = new Date('2026-11-13T18:00:00+08:00');
+  const at0459 = new Date('2026-11-13T04:59:00+08:00');
+  const at0500 = new Date('2026-11-13T05:00:00+08:00');
+
+  assert(getManilaTimeParts(at1759).hour === 17 && getManilaTimeParts(at1759).minute === 59, 'Manila time parses 17:59 accurately');
+  assert(getManilaTimeParts(at1800).hour === 18 && getManilaTimeParts(at1800).minute === 0, 'Manila time parses 18:00 accurately');
+  assert(getManilaTimeParts(at0459).hour === 4 && getManilaTimeParts(at0459).minute === 59, 'Manila time parses 04:59 accurately');
+  assert(getManilaTimeParts(at0500).hour === 5 && getManilaTimeParts(at0500).minute === 0, 'Manila time parses 05:00 accurately');
+
+  const nightZone = { status: 'active', needsLocation: false, activeTime: 'night_only' as const, startHour: 18, endHour: 5 };
+  assert(getZoneWindowBadgeState(nightZone, at1759) === 'outside_window', 'night_only [18, 5) at 17:59 Manila -> Outside window now');
+  assert(getZoneWindowBadgeState(nightZone, at1800) === 'active_now', 'night_only [18, 5) at 18:00 Manila -> Active now');
+  assert(getZoneWindowBadgeState(nightZone, at0459) === 'active_now', 'night_only [18, 5) at 04:59 Manila -> Active now');
+  assert(getZoneWindowBadgeState(nightZone, at0500) === 'outside_window', 'night_only [18, 5) at 05:00 Manila -> Outside window now');
+
+  const dayZone = { status: 'active', needsLocation: false, activeTime: 'day_only' as const, startHour: 5, endHour: 18 };
+  assert(getZoneWindowBadgeState(dayZone, at0459) === 'outside_window', 'day_only [5, 18) at 04:59 Manila -> Outside window now');
+  assert(getZoneWindowBadgeState(dayZone, at0500) === 'active_now', 'day_only [5, 18) at 05:00 Manila -> Active now');
+  assert(getZoneWindowBadgeState(dayZone, at1759) === 'active_now', 'day_only [5, 18) at 17:59 Manila -> Active now');
+  assert(getZoneWindowBadgeState(dayZone, at1800) === 'outside_window', 'day_only [5, 18) at 18:00 Manila -> Outside window now');
+
+  const allDayZone = { status: 'active', needsLocation: false, activeTime: 'all_day' as const, startHour: 0, endHour: 24 };
+  assert(getZoneWindowBadgeState(allDayZone, at1759) === 'active_now', 'all_day at 17:59 Manila -> Active now');
+  assert(getZoneWindowBadgeState(allDayZone, at1800) === 'active_now', 'all_day at 18:00 Manila -> Active now');
+  assert(getZoneWindowBadgeState(allDayZone, at0459) === 'active_now', 'all_day at 04:59 Manila -> Active now');
+  assert(getZoneWindowBadgeState(allDayZone, at0500) === 'active_now', 'all_day at 05:00 Manila -> Active now');
+  assert(isHourInActiveWindow(0, 'all_day', 18, 5) === true, 'all_day is always active regardless of startHour/endHour');
+
+  // Priority checks: status === 'inactive' and needsLocation === true take priority
+  const inactiveZone = { status: 'inactive', needsLocation: false, activeTime: 'all_day' as const, startHour: 0, endHour: 24 };
+  assert(getZoneWindowBadgeState(inactiveZone, at1800) === 'inactive', 'status inactive takes priority over active all_day window');
+
+  const needsLocZone = { status: 'active', needsLocation: true, activeTime: 'all_day' as const, startHour: 0, endHour: 24 };
+  assert(getZoneWindowBadgeState(needsLocZone, at1800) === 'needs_location', 'needsLocation takes priority over active all_day window');
 }
 
 console.log(`\n========================================`);

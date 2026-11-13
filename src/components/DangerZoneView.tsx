@@ -45,7 +45,8 @@ import {
   parseCrimeTypesString,
   serializeCrimeTypes,
   deduplicateDangerZones,
-  hasValidCoordinates
+  hasValidCoordinates,
+  getZoneWindowBadgeState
 } from '../utils/zoneUtils';
 
 interface DangerZoneViewProps {
@@ -79,6 +80,14 @@ export default function DangerZoneView({
   const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [isCsvModalOpen, setIsCsvModalOpen] = useState(false);
+  const [currentTime, setCurrentTime] = useState<Date>(() => new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 30000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Strictly deduplicate zones by document ID so registry and maps render exactly one row per document
   const uniqueDangerZones = React.useMemo(() => {
@@ -1227,6 +1236,7 @@ export default function DangerZoneView({
                   const isHighIncident = crimes >= HIGH_INCIDENT_THRESHOLD;
                   const zoneImg = getReportImage(zone);
                   const isNeedsLoc = zone.needsLocation === true;
+                  const windowBadgeState = getZoneWindowBadgeState(zone, currentTime);
 
                   return (
                     <tr key={zone.id} className={`hover:bg-slate-50/80 ${isNeedsLoc ? 'bg-amber-50/30' : ''}`}>
@@ -1281,11 +1291,22 @@ export default function DangerZoneView({
                         <span className="font-semibold text-slate-800 block text-[11px]">
                           {zone.activeTime === 'night_only' ? 'Night Only' : zone.activeTime === 'day_only' ? 'Day Only' : 'All Day'}
                         </span>
-                        <span className="text-[10px] text-slate-500 font-mono">
+                        <span className="text-[10px] text-slate-500 font-mono block">
                           {zone.activeTime === 'all_day' 
                             ? 'All Day (24 hrs)' 
                             : `${zone.startHour ?? (zone.activeTime === 'night_only' ? 18 : 5)}:00 - ${zone.endHour ?? (zone.activeTime === 'night_only' ? 5 : 18)}:00`}
                         </span>
+                        {(windowBadgeState === 'active_now' || windowBadgeState === 'outside_window') && (
+                          <span
+                            className={`inline-block mt-1 text-[9px] px-1.5 py-0.5 rounded font-semibold border ${
+                              windowBadgeState === 'active_now'
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : 'bg-slate-100 text-slate-600 border-slate-200'
+                            }`}
+                          >
+                            {windowBadgeState === 'active_now' ? 'Active now' : 'Outside window now'}
+                          </span>
+                        )}
                       </td>
 
                       {/* Data Source */}

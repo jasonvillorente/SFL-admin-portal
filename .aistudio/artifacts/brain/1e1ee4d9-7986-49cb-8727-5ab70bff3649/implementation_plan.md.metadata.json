@@ -1,6 +1,0 @@
-{
-  "summary":  "Revised implementation plan for the Community Spots management feature. Incorporates the existing logActivity helper and field shape (adminName, adminEmail, action, timestamp, details), explicit field fallbacks (title -> name, location.lat/lng -> latitude/longitude, photoUrls -> [], approvedByAdmin -> false), dual-collection approval writes ({ status: 'approved', active: true, approvedByAdmin: true } via updateDoc/merge), strict isolation of Danger Zones, rules, and login code, test suite details, and steps to test with the two pending spots.",
-  "updatedAt":  "2026-10-21T05:59:58.820094115Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}
