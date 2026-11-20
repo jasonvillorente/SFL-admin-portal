@@ -5,9 +5,109 @@ import {
   DEFAULT_DAY_HOURS,
   DEFAULT_ALL_DAY_HOURS,
   STANDARD_CATEGORIES,
-  StandardCategory
+  StandardCategory,
+  DANGER_LEVEL_COLORS
 } from './zoneConstants';
-import { DangerZone } from '../types';
+import { DangerZone, DangerLevel, IncidentReport, getReportImage, resolveLocationName } from '../types';
+
+export function normalizeDangerLevel(val?: any): DangerLevel | undefined {
+  if (typeof val !== 'string') return undefined;
+  const trimmed = val.trim().toLowerCase();
+  if (trimmed === 'low' || trimmed === 'high') {
+    return trimmed;
+  }
+  return undefined;
+}
+
+export function getDangerLevelColor(dangerLevel?: string | null) {
+  const norm = normalizeDangerLevel(dangerLevel);
+  if (norm === 'low') return DANGER_LEVEL_COLORS.low;
+  if (norm === 'high') return DANGER_LEVEL_COLORS.high;
+  return DANGER_LEVEL_COLORS.unset;
+}
+
+export function validateDangerLevelRequired(
+  dangerLevel?: string | null
+): { valid: true; level: DangerLevel } | { valid: false; error: string } {
+  const norm = normalizeDangerLevel(dangerLevel);
+  if (!norm) {
+    return { valid: false, error: 'Danger level is required. Please select Low or High.' };
+  }
+  return { valid: true, level: norm };
+}
+
+export function buildQuickConvertDangerZonePayload(
+  report: IncidentReport,
+  zoneId: string,
+  dangerLevel: string | null | undefined,
+  operatorEmail: string,
+  radius: number = 150
+): DangerZone {
+  const levelCheck = validateDangerLevelRequired(dangerLevel);
+  if ('error' in levelCheck) {
+    throw new Error(levelCheck.error);
+  }
+
+  const img = getReportImage(report);
+  return sanitizeFirestorePayload({
+    id: zoneId,
+    zoneId: zoneId,
+    sourceReportId: report.id,
+    reportId: report.id,
+    locationName: resolveLocationName(report, 'Incident Hazard Area'),
+    latitude: Number(report.latitude),
+    longitude: Number(report.longitude),
+    dangerLevel: levelCheck.level,
+    category: report.category || 'Crime',
+    description: report.description || 'Converted from citizen incident report.',
+    radius: Number(radius) || 150,
+    source: 'resident_report',
+    activeTime: 'all_day',
+    startHour: 0,
+    endHour: 24,
+    nightCrimeCount: 0,
+    dayCrimeCount: 0,
+    crimeCount: 0,
+    crimeTypes: {},
+    imageUrl: img || undefined,
+    photoUrl: img || undefined,
+    photos: img ? [img] : [],
+    createdAt: new Date().toISOString(),
+    createdBy: operatorEmail,
+    addedBy: operatorEmail,
+    status: 'active',
+    active: true
+  }) as DangerZone;
+}
+
+export function filterZonesByDangerLevel(
+  zones: DangerZone[],
+  filterLevel: string
+): DangerZone[] {
+  if (!filterLevel || filterLevel === 'all') return zones;
+  return zones.filter(z => {
+    const level = normalizeDangerLevel(z.dangerLevel);
+    if (filterLevel === 'unset') return level === undefined;
+    return level === filterLevel;
+  });
+}
+
+export function countDangerLevels(zones: DangerZone[]): {
+  high: number;
+  low: number;
+  unset: number;
+} {
+  let high = 0;
+  let low = 0;
+  let unset = 0;
+  for (const z of zones) {
+    const level = normalizeDangerLevel(z.dangerLevel);
+    if (level === 'high') high++;
+    else if (level === 'low') low++;
+    else unset++;
+  }
+  return { high, low, unset };
+}
 
 /**
  * Calculates geographical distance in meters between two coordinates using the Haversine formula
@@ -347,8 +447,14 @@ export function mergeZoneData(
     ? incoming.photos
     : (existing.photos || []);
 
+  // Preserve existing dangerLevel unless incoming explicitly sets 'low' or 'high'
+  const incomingLevel = normalizeDangerLevel(incoming.dangerLevel);
+  const existingLevel = normalizeDangerLevel(existing.dangerLevel);
+  const mergedDangerLevel = incomingLevel ?? existingLevel;
+
   const mergedPayload: Partial<DangerZone> = {
     ...incoming,
+    ...(mergedDangerLevel ? { dangerLevel: mergedDangerLevel } : {}),
     source: mergedSource,
     description: mergedDescription,
     imageUrl: mergedImageUrl,
@@ -370,6 +476,10 @@ export function mergeZoneData(
     lastIncidentDate: incoming.lastIncidentDate || existing.lastIncidentDate,
     updatedAt: new Date().toISOString()
   };
+
+  if (!mergedDangerLevel) {
+    delete mergedPayload.dangerLevel;
+  }
 
   // If existing had valid coordinates, clear needsLocation
   if (
@@ -403,6 +513,8 @@ export interface CsvParsedRow {
   crimeTypes: Record<string, number>;
   dataPeriod: string;
   lastIncidentDate: string;
+  dangerLevel?: DangerLevel;
+  dangerLevelInvalid?: boolean;
   needsLocation: boolean;
   status: 'valid' | 'warning' | 'error';
   issues: string[];
@@ -667,6 +779,21 @@ export function parseZoneCsv(
     const dataPeriod = getCol(rowCells, 'dataperiod', 'period');
     const lastIncidentDate = getCol(rowCells, 'lastincidentdate', 'lastdate');
 
+    // 11. Optional dangerLevel column (accept low/high in any letter case)
+    const rawDangerLevel = getCol(rowCells, 'dangerlevel', 'danger_level', 'level');
+    let dangerLevel: DangerLevel | undefined = undefined;
+    let dangerLevelInvalid = false;
+    if (rawDangerLevel !== '') {
+      const normalized = normalizeDangerLevel(rawDangerLevel);
+      if (normalized) {
+        dangerLevel = normalized;
+      } else {
+        dangerLevelInvalid = true;
+        issues.push(`Invalid dangerLevel "${rawDangerLevel}" (expected low or high; will import as Level not set)`);
+        if (rowStatus !== 'error') rowStatus = 'warning';
+      }
+    }
+
     // Duplicate detection against existing danger zones and prior rows in this CSV
     const priorParsedZones: DangerZone[] = parsedRows.map(r => ({
       id: `batch_row_${r.rowIndex}`,
@@ -722,6 +849,8 @@ export function parseZoneCsv(
       crimeTypes,
       dataPeriod,
       lastIncidentDate,
+      dangerLevel,
+      dangerLevelInvalid,
       needsLocation,
       status: rowStatus,
       issues,
@@ -820,7 +949,8 @@ export function generateCsvTemplate(): string {
     'crimeTypes',
     'dataPeriod',
     'lastIncidentDate',
-    'crimeCount'
+    'crimeCount',
+    'dangerLevel'
   ];
 
   const sampleRows = [
@@ -840,7 +970,8 @@ export function generateCsvTemplate(): string {
       '"theft:3;snatching:2"',
       '"Jan 2025 - Sep 2026"',
       '2026-09-15',
-      ''
+      '',
+      'high'
     ],
     [
       '"Arellano Avenue corner Zobel Roxas"',
@@ -858,7 +989,8 @@ export function generateCsvTemplate(): string {
       '"harassment:2"',
       '"Jan 2025 - Sep 2026"',
       '2026-08-10',
-      '2' // crimeCount used when night and day are blank
+      '2', // crimeCount used when night and day are blank
+      'low'
     ],
     [
       '"Palanan Elementary School Vicinity"',
@@ -876,6 +1008,7 @@ export function generateCsvTemplate(): string {
       '"theft:5"',
       '"Jan 2025 - Sep 2026"',
       '2026-09-02',
+      '',
       ''
     ]
   ];

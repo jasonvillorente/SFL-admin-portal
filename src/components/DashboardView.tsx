@@ -14,7 +14,8 @@ import {
   Sparkles
 } from 'lucide-react';
 import { DangerZone, IncidentReport, CommunityAlert, ActivityLog, CommunitySpot, isReportConvertedToZone } from '../types';
-import { HIGH_INCIDENT_THRESHOLD } from '../utils/zoneConstants';
+import { HIGH_INCIDENT_THRESHOLD, DANGER_LEVEL_COLORS } from '../utils/zoneConstants';
+import { countDangerLevels } from '../utils/zoneUtils';
 import InteractiveMap from './InteractiveMap';
 
 interface DashboardViewProps {
@@ -45,6 +46,7 @@ export default function DashboardView({
   const pendingReportsCount = incidentReports.filter(r => r.status === 'pending' && !isReportConvertedToZone(r, dangerZones)).length;
   const pendingSpotsCount = communitySpots.filter(s => (s.status || 'pending').toLowerCase() === 'pending').length;
   const totalResidentsCount = usersCount.residents;
+  const levelCounts = countDangerLevels(dangerZones);
 
   // Render quick metric card definitions:
   // Registered Users, Active Danger Zones, High Incident Zones, Community Spots, Incident Reports
@@ -72,7 +74,7 @@ export default function DashboardView({
       label: 'High Incident Zones',
       value: highIncidentZonesCount,
       icon: AlertTriangle,
-      color: 'text-red-650 bg-red-50 border-red-200',
+      color: 'text-slate-700 bg-slate-100 border-slate-300',
       description: `Zones with ≥ ${HIGH_INCIDENT_THRESHOLD} reported crimes`
     },
     {
@@ -139,6 +141,40 @@ export default function DashboardView({
         })}
       </div>
 
+      {/* Compact Danger Level Breakdown Line */}
+      <div
+        onClick={() => onNavigateToView('danger')}
+        className="bg-white border border-gray-200 rounded px-4 py-2.5 shadow-2xs flex flex-wrap items-center justify-between gap-2 text-xs cursor-pointer hover:bg-slate-50 transition-colors"
+      >
+        <div className="flex flex-wrap items-center gap-3 font-medium text-slate-700">
+          <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500">Danger Level Breakdown:</span>
+          <span className="inline-flex items-center gap-1.5">
+            <span
+              className="w-2.5 h-2.5 rounded-full inline-block"
+              style={{ backgroundColor: DANGER_LEVEL_COLORS.high.fill, border: `1px solid ${DANGER_LEVEL_COLORS.high.stroke}` }}
+            />
+            <span>High level zones: <strong className="font-mono text-slate-900">{levelCounts.high}</strong></span>
+          </span>
+          <span className="text-slate-300">/</span>
+          <span className="inline-flex items-center gap-1.5">
+            <span
+              className="w-2.5 h-2.5 rounded-full inline-block"
+              style={{ backgroundColor: DANGER_LEVEL_COLORS.low.fill, border: `1.5px solid ${DANGER_LEVEL_COLORS.low.stroke}` }}
+            />
+            <span>Low level zones: <strong className="font-mono text-slate-900">{levelCounts.low}</strong></span>
+          </span>
+          <span className="text-slate-300">/</span>
+          <span className="inline-flex items-center gap-1.5">
+            <span
+              className="w-2.5 h-2.5 rounded-full inline-block"
+              style={{ backgroundColor: DANGER_LEVEL_COLORS.unset.fill, border: `1px solid ${DANGER_LEVEL_COLORS.unset.stroke}` }}
+            />
+            <span>Not set: <strong className="font-mono text-slate-900">{levelCounts.unset}</strong></span>
+          </span>
+        </div>
+        <span className="text-[10px] font-bold text-[#1E3A5F] hover:underline">Manage Zones &rarr;</span>
+      </div>
+
       {/* Main Split Row: GIS Small Preview (Left) & Incident/Audit Logs (Right) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         
@@ -192,9 +228,9 @@ export default function DashboardView({
                 <span className="text-sm font-bold text-emerald-600 block mt-0.5">100% SECURE</span>
               </div>
               <div className="bg-slate-50 p-2.5 rounded border border-gray-100">
-                <span className="text-[9px] text-gray-500 block">CRITICAL THREATS</span>
-                <span className="text-sm font-bold text-red-600 block mt-0.5">
-                  {dangerZones.filter(z => (z.riskLevel === 'HIGH' || z.riskLevel === 'High' || z.riskLevel === 'Critical') && z.status === 'active').length}
+                <span className="text-[9px] text-gray-500 block">HIGH LEVEL ZONES</span>
+                <span className="text-sm font-bold text-slate-900 block mt-0.5">
+                  {levelCounts.high}
                 </span>
               </div>
               <div 

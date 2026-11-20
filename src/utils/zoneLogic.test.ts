@@ -23,14 +23,23 @@ import {
   hasValidCoordinates,
   getManilaTimeParts,
   isHourInActiveWindow,
-  getZoneWindowBadgeState
+  getZoneWindowBadgeState,
+  normalizeDangerLevel,
+  getDangerLevelColor,
+  validateDangerLevelRequired,
+  filterZonesByDangerLevel,
+  countDangerLevels,
+  generateCsvTemplate,
+  buildQuickConvertDangerZonePayload
 } from './zoneUtils';
 import {
   STUDY_AREA_BOUNDS,
   DUPLICATE_DISTANCE_METERS,
-  HIGH_INCIDENT_THRESHOLD
+  HIGH_INCIDENT_THRESHOLD,
+  DANGER_LEVEL_COLORS,
+  MAX_BATCH_SIZE
 } from './zoneConstants';
-import { DangerZone } from '../types';
+import { DangerZone, IncidentReport } from '../types';
 
 let passed = 0;
 let failed = 0;
@@ -461,6 +470,175 @@ console.log('\nTest Suite 13: Manila Time Active Window & Badge Priority');
 
   const needsLocZone = { status: 'active', needsLocation: true, activeTime: 'all_day' as const, startHour: 0, endHour: 24 };
   assert(getZoneWindowBadgeState(needsLocZone, at1800) === 'needs_location', 'needsLocation takes priority over active all_day window');
+}
+
+// 14. Two-Level Classification (Low / High) & Legacy Safety
+console.log('\nTest Suite 14: Two-Level Classification (dangerLevel low/high), Colors, CSV, Filter, Bulk & Legacy');
+{
+  // 14a. Required level validation for form save
+  assert(validateDangerLevelRequired('').valid === false, 'Form blocks save when dangerLevel is empty string');
+  assert(validateDangerLevelRequired(undefined).valid === false, 'Form blocks save when dangerLevel is undefined');
+  assert(validateDangerLevelRequired('medium').valid === false, 'Form blocks save when dangerLevel is invalid value');
+  const lowCheck = validateDangerLevelRequired('Low');
+  assert(lowCheck.valid === true && lowCheck.level === 'low', 'Form accepts Low and stores lowercase "low"');
+  const highCheck = validateDangerLevelRequired('HIGH');
+  assert(highCheck.valid === true && highCheck.level === 'high', 'Form accepts HIGH and stores lowercase "high"');
+
+  // 14b. Shared colors from zoneConstants
+  const lowColors = getDangerLevelColor('low');
+  assert(lowColors.fill === '#FACC15' && lowColors.stroke === '#A16207', 'Low level uses #FACC15 fill and #A16207 outline');
+  assert(DANGER_LEVEL_COLORS.low.text === '#422006', 'Low badge text contrast color is #422006');
+  const highColors = getDangerLevelColor('high');
+  assert(highColors.fill === '#DC2626' && highColors.stroke === '#DC2626', 'High level uses #DC2626');
+  const unsetColors = getDangerLevelColor(undefined);
+  assert(unsetColors.fill === '#64748B' && unsetColors.label === 'Level not set', 'Unset level uses neutral slate and "Level not set" label');
+
+  // 14c. Legacy zone with riskLevel but NO dangerLevel shows "Level not set" and never reads riskLevel
+  const legacyOnlyZone: DangerZone = {
+    id: 'legacy-risk-1',
+    zoneId: 'legacy-risk-1',
+    locationName: 'Legacy High Risk Zone',
+    latitude: 14.5585,
+    longitude: 121.0020,
+    radius: 120,
+    category: 'Crime',
+    description: 'Legacy record',
+    status: 'active',
+    riskLevel: 'High',
+    color: 'Red'
+  };
+  assert(normalizeDangerLevel(legacyOnlyZone.dangerLevel) === undefined, 'Legacy zone without dangerLevel normalizes to undefined');
+  assert(getDangerLevelColor(legacyOnlyZone.dangerLevel).label === 'Level not set', 'Legacy zone with riskLevel but no dangerLevel displays "Level not set"');
+  assert(legacyOnlyZone.riskLevel === 'High' && legacyOnlyZone.color === 'Red', 'Legacy riskLevel and color remain intact');
+
+  // 14d. CSV parsing of dangerLevel column (valid case-insensitive, invalid warning, blank unset, template)
+  const csvWithLevels = [
+    'name,lat,lng,radius,category,description,source,dangerLevel',
+    '"Zone Alpha",14.5580,121.0020,100,Crime,"Low zone",barangay_data,low',
+    '"Zone Beta",14.5585,121.0025,100,Crime,"High mixed case",barangay_data,High',
+    '"Zone Gamma",14.5590,121.0030,100,Crime,"Low uppercase",barangay_data,LOW',
+    '"Zone Delta",14.5595,121.0035,100,Crime,"Invalid level",barangay_data,critical',
+    '"Zone Epsilon",14.5600,121.0040,100,Crime,"Blank level",barangay_data,'
+  ].join('\n');
+  const csvRes = parseZoneCsv(csvWithLevels);
+  assert(csvRes.rows.length === 5, 'CSV parses all 5 dangerLevel test rows');
+  assert(csvRes.rows[0].dangerLevel === 'low' && !csvRes.rows[0].dangerLevelInvalid, 'CSV parses lowercase "low" cleanly');
+  assert(csvRes.rows[1].dangerLevel === 'high' && !csvRes.rows[1].dangerLevelInvalid, 'CSV parses mixed-case "High" as "high"');
+  assert(csvRes.rows[2].dangerLevel === 'low' && !csvRes.rows[2].dangerLevelInvalid, 'CSV parses uppercase "LOW" as "low"');
+  assert(
+    csvRes.rows[3].dangerLevel === undefined &&
+    csvRes.rows[3].dangerLevelInvalid === true &&
+    csvRes.rows[3].status === 'warning' &&
+    csvRes.rows[3].issues.some(i => i.toLowerCase().includes('invalid dangerlevel')),
+    'CSV invalid dangerLevel ("critical") emits row warning and imports as Level not set (no silent default)'
+  );
+  assert(
+    csvRes.rows[4].dangerLevel === undefined &&
+    !csvRes.rows[4].dangerLevelInvalid &&
+    csvRes.rows[4].status === 'valid',
+    'CSV blank dangerLevel imports cleanly as Level not set without error or warning'
+  );
+
+  const templateText = generateCsvTemplate();
+  const templateHeader = templateText.split('\n')[0];
+  assert(templateHeader.includes('dangerLevel'), 'CSV template header includes dangerLevel column');
+  assert(templateText.includes(',high') && templateText.includes(',low'), 'CSV template includes sample high and low rows');
+
+  // 14e. Duplicate update keeps existing dangerLevel when CSV cell is blank & preserves legacy riskLevel
+  const existingHighZone: DangerZone = {
+    id: 'z-exist-high',
+    zoneId: 'z-exist-high',
+    locationName: 'Dian Corner',
+    latitude: 14.5580,
+    longitude: 121.0020,
+    radius: 100,
+    category: 'Crime',
+    description: 'Old desc',
+    status: 'active',
+    dangerLevel: 'high',
+    riskLevel: 'Moderate'
+  };
+  const mergedWithBlankLevel = mergeZoneData(existingHighZone, {
+    locationName: 'Dian Corner',
+    crimeCount: 4
+    // dangerLevel omitted (blank CSV cell)
+  });
+  assert(mergedWithBlankLevel.dangerLevel === 'high', 'Duplicate update preserves existing dangerLevel when incoming CSV cell is blank');
+
+  const mergedWithNewLevel = mergeZoneData(existingHighZone, {
+    locationName: 'Dian Corner',
+    dangerLevel: 'low'
+  });
+  assert(mergedWithNewLevel.dangerLevel === 'low', 'Duplicate update applies explicit incoming dangerLevel');
+
+  // 14f. List filter & dashboard counts
+  const sampleZones: DangerZone[] = [
+    { id: '1', zoneId: '1', locationName: 'Low Zone', latitude: 14.558, longitude: 121.001, radius: 100, category: 'Crime', description: '', status: 'active', dangerLevel: 'low' },
+    { id: '2', zoneId: '2', locationName: 'High Zone', latitude: 14.559, longitude: 121.002, radius: 100, category: 'Crime', description: '', status: 'active', dangerLevel: 'high' },
+    legacyOnlyZone
+  ];
+  assert(filterZonesByDangerLevel(sampleZones, 'all').length === 3, 'Filter "all" returns all 3 zones');
+  assert(filterZonesByDangerLevel(sampleZones, 'low').map(z => z.id).join(',') === '1', 'Filter "low" returns only Low zone');
+  assert(filterZonesByDangerLevel(sampleZones, 'high').map(z => z.id).join(',') === '2', 'Filter "high" returns only High zone');
+  assert(filterZonesByDangerLevel(sampleZones, 'unset').map(z => z.id).join(',') === 'legacy-risk-1', 'Filter "unset" returns legacy zone without dangerLevel');
+
+  const counts = countDangerLevels(sampleZones);
+  assert(counts.high === 1 && counts.low === 1 && counts.unset === 1, 'Dashboard level counts return High: 1 / Low: 1 / Not set: 1');
+
+  // 14g. Bulk set batching constant & patch integrity
+  assert(MAX_BATCH_SIZE === 500, 'Bulk set batching limit MAX_BATCH_SIZE is 500');
+  const bulkSanitized = sanitizeFirestorePayload({ dangerLevel: 'high' as const, updatedAt: '2026-11-20T00:00:00Z' });
+  assert(bulkSanitized.dangerLevel === 'high' && !('riskLevel' in bulkSanitized), 'Bulk patch updates only dangerLevel & updatedAt without touching riskLevel');
+}
+
+// 15. Quick-Convert from Resident Report requires Low or High (no default)
+console.log('\nTest Suite 15: Quick-Convert Danger Level Requirement');
+{
+  const sampleReport: IncidentReport = {
+    id: 'rep-quick-1',
+    userId: 'resident-1',
+    reporterName: 'Resident Juan',
+    locationName: 'Bautista corner Casino',
+    latitude: 14.5578,
+    longitude: 121.0012,
+    category: 'Crime',
+    description: 'Dark corner near sari-sari store',
+    dateSubmitted: '2026-11-20',
+    status: 'pending'
+  };
+
+  let emptyBlocked = false;
+  try {
+    buildQuickConvertDangerZonePayload(sampleReport, 'zone-q1', '', 'admin@palanan.gov.ph');
+  } catch {
+    emptyBlocked = true;
+  }
+  assert(emptyBlocked === true, 'Quick-convert blocks creation when dangerLevel is empty string (no default)');
+
+  let undefinedBlocked = false;
+  try {
+    buildQuickConvertDangerZonePayload(sampleReport, 'zone-q2', undefined, 'admin@palanan.gov.ph');
+  } catch {
+    undefinedBlocked = true;
+  }
+  assert(undefinedBlocked === true, 'Quick-convert blocks creation when dangerLevel is undefined (no default)');
+
+  let invalidBlocked = false;
+  try {
+    buildQuickConvertDangerZonePayload(sampleReport, 'zone-q3', 'medium', 'admin@palanan.gov.ph');
+  } catch {
+    invalidBlocked = true;
+  }
+  assert(invalidBlocked === true, 'Quick-convert blocks creation when dangerLevel is invalid');
+
+  const lowZone = buildQuickConvertDangerZonePayload(sampleReport, 'zone-q-low', 'Low', 'admin@palanan.gov.ph');
+  assert(lowZone.dangerLevel === 'low', 'Quick-convert with Low sets dangerLevel to lowercase "low"');
+  assert(lowZone.source === 'resident_report' && lowZone.sourceReportId === 'rep-quick-1', 'Quick-convert preserves resident_report source and sourceReportId');
+  assert(lowZone.crimeCount === 0 && lowZone.activeTime === 'all_day' && lowZone.radius === 150, 'Quick-convert keeps crimeCount 0, activeTime all_day, and radius 150');
+  assert(!('dataPeriod' in lowZone) && !('riskLevel' in lowZone), 'Quick-convert omits dataPeriod and legacy riskLevel');
+
+  const highZone = buildQuickConvertDangerZonePayload(sampleReport, 'zone-q-high', 'high', 'admin@palanan.gov.ph');
+  assert(highZone.dangerLevel === 'high', 'Quick-convert with High sets dangerLevel to "high"');
 }
 
 console.log(`\n========================================`);

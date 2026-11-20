@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { 
   IncidentReport, 
   DangerZone,
+  DangerLevel,
   UserAccount, 
   getResidentName, 
   formatPhoneNumber, 
@@ -41,6 +42,8 @@ import {
 } from 'lucide-react';
 import ConfirmDialog from './ConfirmDialog';
 import AlertToast from './AlertToast';
+import { DANGER_LEVEL_COLORS } from '../utils/zoneConstants';
+import { validateDangerLevelRequired } from '../utils/zoneUtils';
 
 interface IncidentReportsViewProps {
   incidentReports: IncidentReport[];
@@ -51,7 +54,7 @@ interface IncidentReportsViewProps {
   onDeleteReport: (id: string) => Promise<void>;
   onPurgeTestReports?: (reportIds: string[]) => Promise<void>;
   onConvertToDangerZone: (report: IncidentReport) => void;
-  onQuickConvertToDangerZone?: (report: IncidentReport) => Promise<void>;
+  onQuickConvertToDangerZone?: (report: IncidentReport, dangerLevel: DangerLevel) => Promise<void>;
 }
 
 export default function IncidentReportsView({
@@ -70,6 +73,10 @@ export default function IncidentReportsView({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [quickConvertReport, setQuickConvertReport] = useState<IncidentReport | null>(null);
+  const [quickConvertLevel, setQuickConvertLevel] = useState<DangerLevel | ''>('');
+  const [quickConvertError, setQuickConvertError] = useState<string | null>(null);
+  const [isQuickConverting, setIsQuickConverting] = useState(false);
 
   const [confirmConfig, setConfirmConfig] = useState<{
     title: string;
@@ -766,19 +773,13 @@ export default function IncidentReportsView({
                     {onQuickConvertToDangerZone && (
                       <button
                         type="button"
-                        onClick={async () => {
-                          try {
-                            await onQuickConvertToDangerZone(selectedReport);
-                            setToastConfig({ 
-                              message: `Successfully converted "${resolveLocationName(selectedReport)}" into an active Danger Zone!`, 
-                              type: 'success' 
-                            });
-                          } catch (err: any) {
-                            setToastConfig({ message: `Failed to create danger zone: ${err.message}`, type: 'error' });
-                          }
+                        onClick={() => {
+                          setQuickConvertReport(selectedReport);
+                          setQuickConvertLevel('');
+                          setQuickConvertError(null);
                         }}
                         className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold tracking-wider text-xs flex items-center justify-center space-x-1.5 shadow transition-colors cursor-pointer"
-                        title="Instantly convert this citizen report into a Danger Zone with 1 click"
+                        title="Choose Low or High danger level and convert this citizen report into a Danger Zone"
                       >
                         <ShieldCheck className="w-4 h-4 text-emerald-100" />
                         <span>QUICK CREATE DANGER ZONE</span>
@@ -815,7 +816,15 @@ export default function IncidentReportsView({
                         return (
                           <div className="bg-white/80 p-2 rounded border border-emerald-150 text-[10px] font-mono mt-1 space-y-0.5 text-slate-700">
                             <div><strong>Zone:</strong> {matchedZone.locationName}</div>
-                            <div><strong>Risk Level:</strong> {matchedZone.riskLevel} ({matchedZone.radius || 150}m radius)</div>
+                            <div>
+                              <strong>Danger Level:</strong>{' '}
+                              {matchedZone.dangerLevel === 'low'
+                                ? 'Low'
+                                : matchedZone.dangerLevel === 'high'
+                                ? 'High'
+                                : 'Level not set'}{' '}
+                              ({matchedZone.radius || 150}m radius)
+                            </div>
                           </div>
                         );
                       }
@@ -885,6 +894,160 @@ export default function IncidentReportsView({
             <div className="px-4 py-2 bg-slate-800/80 border-t border-slate-700 text-[11px] text-slate-400 flex items-center justify-between">
               <span>Press anywhere outside or the close icon to dismiss.</span>
               <span className="font-mono text-[10px] text-slate-500 truncate max-w-md">{previewImage}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Quick-Convert Danger Level Chooser Modal (No default selected) */}
+      {quickConvertReport && onQuickConvertToDangerZone && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => {
+            if (!isQuickConverting) {
+              setQuickConvertReport(null);
+              setQuickConvertLevel('');
+              setQuickConvertError(null);
+            }
+          }}
+        >
+          <div
+            className="bg-white border border-slate-200 rounded-lg shadow-xl max-w-md w-full p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h4 className="text-sm font-bold text-slate-900 font-display">
+                  Choose Danger Level
+                </h4>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Select Low or High before creating a Danger Zone from this report.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isQuickConverting}
+                onClick={() => {
+                  setQuickConvertReport(null);
+                  setQuickConvertLevel('');
+                  setQuickConvertError(null);
+                }}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded text-xs space-y-1">
+              <div className="font-bold text-slate-900">{resolveLocationName(quickConvertReport)}</div>
+              <div className="text-[11px] text-slate-500">
+                Category: {quickConvertReport.category || 'Crime'} &bull; Radius: 150m
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Danger Level <span className="text-red-500">*</span>
+              </label>
+              <div className="grid grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  disabled={isQuickConverting}
+                  onClick={() => {
+                    setQuickConvertLevel('low');
+                    setQuickConvertError(null);
+                  }}
+                  className={`px-3 py-2.5 rounded border text-xs font-bold flex items-center justify-center space-x-2 transition-all cursor-pointer ${
+                    quickConvertLevel === 'low'
+                      ? 'ring-2 ring-[#A16207] shadow-xs'
+                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+                  }`}
+                  style={quickConvertLevel === 'low' ? {
+                    backgroundColor: DANGER_LEVEL_COLORS.low.fill,
+                    borderColor: DANGER_LEVEL_COLORS.low.stroke,
+                    color: DANGER_LEVEL_COLORS.low.text
+                  } : undefined}
+                >
+                  <span
+                    className="w-3 h-3 rounded-full shrink-0"
+                    style={{ backgroundColor: DANGER_LEVEL_COLORS.low.fill, border: `1.5px solid ${DANGER_LEVEL_COLORS.low.stroke}` }}
+                  />
+                  <span>Low</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isQuickConverting}
+                  onClick={() => {
+                    setQuickConvertLevel('high');
+                    setQuickConvertError(null);
+                  }}
+                  className={`px-3 py-2.5 rounded border text-xs font-bold flex items-center justify-center space-x-2 transition-all cursor-pointer ${
+                    quickConvertLevel === 'high'
+                      ? 'ring-2 ring-[#991B1B] shadow-xs'
+                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+                  }`}
+                  style={quickConvertLevel === 'high' ? {
+                    backgroundColor: DANGER_LEVEL_COLORS.high.fill,
+                    borderColor: '#991B1B',
+                    color: DANGER_LEVEL_COLORS.high.text
+                  } : undefined}
+                >
+                  <span
+                    className="w-3 h-3 rounded-full shrink-0"
+                    style={{ backgroundColor: DANGER_LEVEL_COLORS.high.fill, border: '1.5px solid #991B1B' }}
+                  />
+                  <span>High</span>
+                </button>
+              </div>
+              {quickConvertError && (
+                <p className="text-[11px] text-rose-700 font-semibold mt-1.5">{quickConvertError}</p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={isQuickConverting}
+                onClick={() => {
+                  setQuickConvertReport(null);
+                  setQuickConvertLevel('');
+                  setQuickConvertError(null);
+                }}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded border border-slate-300 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isQuickConverting || !quickConvertLevel}
+                onClick={async () => {
+                  const check = validateDangerLevelRequired(quickConvertLevel);
+                  if ('error' in check) {
+                    setQuickConvertError(check.error);
+                    return;
+                  }
+                  setIsQuickConverting(true);
+                  setQuickConvertError(null);
+                  try {
+                    await onQuickConvertToDangerZone(quickConvertReport, check.level);
+                    const locLabel = resolveLocationName(quickConvertReport);
+                    setQuickConvertReport(null);
+                    setQuickConvertLevel('');
+                    setToastConfig({
+                      message: `Successfully converted "${locLabel}" into an active ${check.level === 'high' ? 'High' : 'Low'} Danger Zone!`,
+                      type: 'success'
+                    });
+                  } catch (err: any) {
+                    setQuickConvertError(err?.message || 'Failed to create danger zone.');
+                  } finally {
+                    setIsQuickConverting(false);
+                  }
+                }}
+                className="px-4 py-2 text-xs font-bold text-white bg-[#1E3A5F] hover:bg-[#132844] disabled:bg-slate-300 disabled:cursor-not-allowed rounded shadow-xs cursor-pointer"
+              >
+                {isQuickConverting ? 'Creating Zone...' : 'Create Danger Zone'}
+              </button>
             </div>
           </div>
         </div>

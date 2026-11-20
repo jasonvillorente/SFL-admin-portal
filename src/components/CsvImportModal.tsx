@@ -25,7 +25,8 @@ import {
   DUPLICATE_DISTANCE_METERS, 
   MAX_BATCH_SIZE, 
   PRIVACY_DATA_HINT,
-  STUDY_AREA_BOUNDS 
+  STUDY_AREA_BOUNDS,
+  DANGER_LEVEL_COLORS
 } from '../utils/zoneConstants';
 
 export interface FailedRowDetail {
@@ -271,6 +272,9 @@ export default function CsvImportModal({
             importBatchId: batchId,
             importedAt: importedAt
           };
+          if (row.dangerLevel) {
+            updateChanges.dangerLevel = row.dangerLevel;
+          }
           if (row.dataPeriod && row.dataPeriod.trim()) {
             updateChanges.dataPeriod = row.dataPeriod.trim();
           }
@@ -309,6 +313,9 @@ export default function CsvImportModal({
         createdAt: new Date().toISOString()
       };
 
+      if (row.dangerLevel) {
+        zonePayload.dangerLevel = row.dangerLevel;
+      }
       if (!row.needsLocation && row.lat !== null && row.lng !== null) {
         zonePayload.latitude = row.lat;
         zonePayload.longitude = row.lng;
@@ -702,6 +709,7 @@ export default function CsvImportModal({
                       <th className="px-3 py-2 text-left font-bold text-slate-600 uppercase text-[10px]">Row</th>
                       <th className="px-3 py-2 text-left font-bold text-slate-600 uppercase text-[10px]">Status</th>
                       <th className="px-3 py-2 text-left font-bold text-slate-600 uppercase text-[10px]">Location Name</th>
+                      <th className="px-3 py-2 text-left font-bold text-slate-600 uppercase text-[10px]">Level</th>
                       <th className="px-3 py-2 text-left font-bold text-slate-600 uppercase text-[10px]">Coords / Geo</th>
                       <th className="px-3 py-2 text-left font-bold text-slate-600 uppercase text-[10px]">Crimes</th>
                       <th className="px-3 py-2 text-left font-bold text-slate-600 uppercase text-[10px]">Active Hours</th>
@@ -712,7 +720,7 @@ export default function CsvImportModal({
                   <tbody className="divide-y divide-gray-100 bg-white">
                     {visibleRows.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="px-4 py-6 text-center text-gray-400 italic">
+                        <td colSpan={9} className="px-4 py-6 text-center text-gray-400 italic">
                           No rows match the selected filter.
                         </td>
                       </tr>
@@ -745,6 +753,39 @@ export default function CsvImportModal({
                               )}
                             </td>
                             <td className="px-3 py-2 font-medium text-slate-900">{r.name}</td>
+                            <td className="px-3 py-2 whitespace-nowrap">
+                              {r.dangerLevel === 'low' ? (
+                                <span
+                                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold"
+                                  style={{
+                                    backgroundColor: DANGER_LEVEL_COLORS.low.fill,
+                                    border: `1px solid ${DANGER_LEVEL_COLORS.low.stroke}`,
+                                    color: DANGER_LEVEL_COLORS.low.text
+                                  }}
+                                >
+                                  Low
+                                </span>
+                              ) : r.dangerLevel === 'high' ? (
+                                <span
+                                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold"
+                                  style={{
+                                    backgroundColor: DANGER_LEVEL_COLORS.high.fill,
+                                    border: '1px solid #991B1B',
+                                    color: DANGER_LEVEL_COLORS.high.text
+                                  }}
+                                >
+                                  High
+                                </span>
+                              ) : (
+                                <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border ${
+                                  r.dangerLevelInvalid
+                                    ? 'bg-amber-50 text-amber-800 border-amber-300'
+                                    : 'bg-slate-100 text-slate-600 border-slate-300'
+                                }`}>
+                                  Level not set
+                                </span>
+                              )}
+                            </td>
                             <td className="px-3 py-2 text-[11px] text-slate-600 font-mono">
                               {r.lat !== null && r.lng !== null 
                                 ? `${r.lat.toFixed(4)}, ${r.lng.toFixed(4)}` 

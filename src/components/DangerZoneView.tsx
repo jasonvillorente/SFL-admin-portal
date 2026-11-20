@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { DangerZone, getReportImage, getAllReportImages, resolveLocationName, safeString } from '../types';
+import { DangerZone, DangerLevel, getReportImage, getAllReportImages, resolveLocationName, safeString } from '../types';
 import InteractiveMap from './InteractiveMap';
 import { 
   Plus, 
@@ -31,7 +31,7 @@ import {
   PALANAN_CENTER, 
   STUDY_AREA_BOUNDS, 
   HIGH_INCIDENT_THRESHOLD, 
-  ZONE_COLOR,
+  DANGER_LEVEL_COLORS,
   PRIVACY_DATA_HINT,
   STANDARD_CATEGORIES,
   DEFAULT_NIGHT_HOURS,
@@ -46,8 +46,18 @@ import {
   serializeCrimeTypes,
   deduplicateDangerZones,
   hasValidCoordinates,
-  getZoneWindowBadgeState
+  getZoneWindowBadgeState,
+  normalizeDangerLevel,
+  getDangerLevelColor,
+  validateDangerLevelRequired,
+  filterZonesByDangerLevel
 } from '../utils/zoneUtils';
+
+export interface BulkSetLevelResult {
+  updatedCount: number;
+  failedCount: number;
+  failedItems: Array<{ id: string; name: string; reason: string }>;
+}
 
 interface DangerZoneViewProps {
   dangerZones: DangerZone[];
@@ -56,6 +66,7 @@ interface DangerZoneViewProps {
   onAddDangerZone: (zone: Omit<DangerZone, 'id'>) => Promise<void>;
   onUpdateDangerZone: (id: string, zone: Partial<DangerZone>) => Promise<void>;
   onDeleteDangerZone: (id: string) => Promise<void>;
+  onBulkSetDangerLevel?: (ids: string[], level: DangerLevel) => Promise<BulkSetLevelResult>;
   onBatchImport?: (
     toAdd: Omit<DangerZone, 'id'>[],
     toUpdate: { id: string; changes: Partial<DangerZone> }[],
@@ -73,6 +84,7 @@ export default function DangerZoneView({
   onAddDangerZone,
   onUpdateDangerZone,
   onDeleteDangerZone,
+  onBulkSetDangerLevel,
   onBatchImport,
   onUndoBatchImport
 }: DangerZoneViewProps) {
@@ -136,7 +148,14 @@ export default function DangerZoneView({
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [filterSource, setFilterSource] = useState<string>('all');
   const [filterActiveTime, setFilterActiveTime] = useState<string>('all');
+  const [filterDangerLevel, setFilterDangerLevel] = useState<string>('all');
   const [filterNeedsLocationOnly, setFilterNeedsLocationOnly] = useState(false);
+
+  // Bulk selection & level assignment states
+  const [selectedZoneIds, setSelectedZoneIds] = useState<string[]>([]);
+  const [bulkTargetLevel, setBulkTargetLevel] = useState<DangerLevel>('low');
+  const [isBulkUpdating, setIsBulkUpdating] = useState(false);
+  const [bulkFailureReport, setBulkFailureReport] = useState<Array<{ id: string; name: string; reason: string }> | null>(null);
 
   // Modals & Alerts
   const [confirmConfig, setConfirmConfig] = useState<{
@@ -172,6 +191,8 @@ export default function DangerZoneView({
   ]);
 
   // Form states: Group 3 - Details
+  const [dangerLevel, setDangerLevel] = useState<DangerLevel | ''>('');
+  const [keepLevel, setKeepLevel] = useState<boolean>(false);
   const [category, setCategory] = useState<string>('Crime');
   const [source, setSource] = useState<'barangay_data' | 'resident_report' | 'both'>('barangay_data');
   const [description, setDescription] = useState('');
@@ -181,6 +202,12 @@ export default function DangerZoneView({
   const [needsLocation, setNeedsLocation] = useState(false);
 
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Keep selectedZoneIds pruned to existing deduplicated zone IDs
+  useEffect(() => {
+    const validIds = new Set(uniqueDangerZones.map(z => z.id));
+    setSelectedZoneIds(prev => prev.filter(id => validIds.has(id)));
+  }, [uniqueDangerZones]);
 
   // Derived crime count
   const effectiveCrimeCount = noSplitMode 
@@ -205,6 +232,7 @@ export default function DangerZoneView({
       if (initialPrefill.description) setDescription(initialPrefill.description);
       const img = initialPrefill.imageUrl || initialPrefill.photoUrl || (initialPrefill.photos && initialPrefill.photos[0]);
       if (img) setImageUrl(img);
+      setDangerLevel(normalizeDangerLevel(initialPrefill.dangerLevel) || '');
 
       // Requirement 2: Quick-convert from resident reports: crimeCount 0, no dataPeriod (not 1)
       setSource('resident_report');
@@ -290,9 +318,13 @@ export default function DangerZoneView({
     setFormError(null);
 
     if (!keepStickyFields) {
+      setDangerLevel('');
+      setKeepLevel(false);
       setSource('barangay_data');
       setDataPeriod('Jan 2025 - Sep 2026');
       onClearPrefill?.();
+    } else if (!keepLevel) {
+      setDangerLevel('');
     }
   };
 
@@ -320,6 +352,8 @@ export default function DangerZoneView({
     setLocationName(zone.locationName);
     setLatitude(zone.latitude !== undefined && zone.latitude !== null && !isNaN(Number(zone.latitude)) ? Number(zone.latitude) : null);
     setLongitude(zone.longitude !== undefined && zone.longitude !== null && !isNaN(Number(zone.longitude)) ? Number(zone.longitude) : null);
+    setDangerLevel(normalizeDangerLevel(zone.dangerLevel) || '');
+    setKeepLevel(false);
     setCategory(zone.category || 'Crime');
     setRadius(zone.radius || 150);
     setDescription(zone.description || '');
@@ -413,7 +447,14 @@ export default function DangerZoneView({
       return null;
     }
 
-    // 4. Counts validation (non-negative whole numbers)
+    // 4. Required Danger Level (Low / High)
+    const levelCheck = validateDangerLevelRequired(dangerLevel);
+    if ('error' in levelCheck) {
+      setFormError(levelCheck.error);
+      return null;
+    }
+
+    // 5. Counts validation (non-negative whole numbers)
     if (noSplitMode) {
       if (directCrimeCount < 0 || isNaN(directCrimeCount)) {
         setFormError('Total crime count must be a non-negative whole number (0 or higher).');
@@ -442,6 +483,7 @@ export default function DangerZoneView({
       latitude: Number(latitude),
       longitude: Number(longitude),
       radius: Number(radius),
+      dangerLevel: levelCheck.level,
       category,
       source,
       activeTime,
@@ -483,12 +525,14 @@ export default function DangerZoneView({
       }
 
       if (addAnother) {
-        // "Save and add another" keeps dataPeriod and source
+        // "Save and add another" keeps dataPeriod, source, and dangerLevel ONLY if keepLevel is ticked
         const savedPeriod = dataPeriod;
         const savedSource = source;
+        const savedLevel = keepLevel ? dangerLevel : '';
         resetForm(true);
         setDataPeriod(savedPeriod);
         setSource(savedSource);
+        setDangerLevel(savedLevel);
         setIsAdding(true);
         setEditingZoneId(null);
       } else {
@@ -548,7 +592,7 @@ export default function DangerZoneView({
   };
 
   // Filtered table rows - derived strictly from deduplicated zones
-  const filteredZones = uniqueDangerZones.filter(zone => {
+  const baseFilteredZones = uniqueDangerZones.filter(zone => {
     if (filterNeedsLocationOnly && !zone.needsLocation) return false;
     if (filterCategory !== 'all' && zone.category !== filterCategory) return false;
     if (filterSource !== 'all' && zone.source !== filterSource) return false;
@@ -561,6 +605,70 @@ export default function DangerZoneView({
     }
     return true;
   });
+
+  const filteredZones = filterZonesByDangerLevel(baseFilteredZones, filterDangerLevel);
+
+  const allFilteredSelected =
+    filteredZones.length > 0 && filteredZones.every(z => selectedZoneIds.includes(z.id));
+
+  const toggleSelectAllFiltered = () => {
+    if (allFilteredSelected) {
+      const filteredSet = new Set(filteredZones.map(z => z.id));
+      setSelectedZoneIds(prev => prev.filter(id => !filteredSet.has(id)));
+    } else {
+      const next = new Set(selectedZoneIds);
+      filteredZones.forEach(z => next.add(z.id));
+      setSelectedZoneIds(Array.from(next));
+    }
+  };
+
+  const toggleSelectZone = (id: string) => {
+    setSelectedZoneIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    );
+  };
+
+  const handleBulkSetLevelPrompt = () => {
+    if (!onBulkSetDangerLevel || selectedZoneIds.length === 0) return;
+    const count = selectedZoneIds.length;
+    const targetLevel = bulkTargetLevel;
+    const labelText = targetLevel === 'high' ? 'High' : 'Low';
+    setConfirmConfig({
+      title: 'Set Level for Selected Zones',
+      message: `Set danger level to "${labelText}" for ${count} selected danger zone${count === 1 ? '' : 's'}? Existing zone fields (including crime counts and legacy data) will remain intact.`,
+      isDestructive: false,
+      onConfirm: async () => {
+        setConfirmConfig(null);
+        setIsBulkUpdating(true);
+        setBulkFailureReport(null);
+        try {
+          const result = await onBulkSetDangerLevel(selectedZoneIds, targetLevel);
+          if (result.failedCount > 0) {
+            setBulkFailureReport(result.failedItems);
+            const failedSet = new Set(result.failedItems.map(f => f.id));
+            setSelectedZoneIds(prev => prev.filter(id => failedSet.has(id)));
+            setToastConfig({
+              message: `Updated ${result.updatedCount} zone(s) to ${labelText}; ${result.failedCount} failed.`,
+              type: 'error'
+            });
+          } else {
+            setSelectedZoneIds([]);
+            setToastConfig({
+              message: `Successfully set danger level to "${labelText}" for ${result.updatedCount} danger zone${result.updatedCount === 1 ? '' : 's'}.`,
+              type: 'success'
+            });
+          }
+        } catch (err: any) {
+          setToastConfig({
+            message: `Bulk level update failed: ${err?.message || String(err)}`,
+            type: 'error'
+          });
+        } finally {
+          setIsBulkUpdating(false);
+        }
+      }
+    });
+  };
 
   return (
     <div className="space-y-6" id="danger-zones-view-root">
@@ -680,7 +788,7 @@ export default function DangerZoneView({
                 createLat={latitude}
                 createLng={longitude}
                 createRadius={radius}
-                createColor={ZONE_COLOR}
+                createDangerLevel={dangerLevel}
               />
             </div>
             
@@ -888,8 +996,8 @@ export default function DangerZoneView({
                       <div className="bg-slate-200 border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono font-bold text-slate-900 flex items-center justify-between">
                         <span>{effectiveCrimeCount}</span>
                         {effectiveCrimeCount >= HIGH_INCIDENT_THRESHOLD && (
-                          <span className="text-[9px] bg-neutral-800 text-neutral-200 border border-neutral-700 px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">
-                            High (≥{HIGH_INCIDENT_THRESHOLD})
+                          <span className="text-[9px] bg-slate-100 text-slate-700 border border-slate-300 px-1.5 py-0.5 rounded font-semibold">
+                            {HIGH_INCIDENT_THRESHOLD}+ incidents
                           </span>
                         )}
                       </div>
@@ -1029,6 +1137,75 @@ export default function DangerZoneView({
                 <div className="flex items-center space-x-2 text-xs font-bold text-slate-800 uppercase tracking-wide">
                   <Layers className="w-3.5 h-3.5 text-indigo-600" />
                   <span>3. Classification & Remarks</span>
+                </div>
+
+                {/* Required Danger Level Selector (no default for new/unset zones) */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                      Danger Level <span className="text-red-500">*</span>
+                    </label>
+                    {!editingZoneId && (
+                      <label className="flex items-center space-x-1.5 cursor-pointer text-[11px] text-slate-600 font-medium">
+                        <input
+                          type="checkbox"
+                          checked={keepLevel}
+                          onChange={(e) => setKeepLevel(e.target.checked)}
+                          className="rounded border-slate-300 text-[#1E3A5F]"
+                        />
+                        <span>Keep level on &ldquo;Save and add another&rdquo;</span>
+                      </label>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => { setDangerLevel('low'); setFormError(null); }}
+                      className={`px-3 py-2 rounded border text-xs font-bold flex items-center justify-center space-x-2 transition-all cursor-pointer ${
+                        dangerLevel === 'low'
+                          ? 'ring-2 ring-[#A16207] shadow-xs'
+                          : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+                      }`}
+                      style={dangerLevel === 'low' ? {
+                        backgroundColor: DANGER_LEVEL_COLORS.low.fill,
+                        borderColor: DANGER_LEVEL_COLORS.low.stroke,
+                        color: DANGER_LEVEL_COLORS.low.text
+                      } : undefined}
+                    >
+                      <span
+                        className="w-3 h-3 rounded-full shrink-0"
+                        style={{ backgroundColor: DANGER_LEVEL_COLORS.low.fill, border: `1.5px solid ${DANGER_LEVEL_COLORS.low.stroke}` }}
+                      />
+                      <span>Low</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => { setDangerLevel('high'); setFormError(null); }}
+                      className={`px-3 py-2 rounded border text-xs font-bold flex items-center justify-center space-x-2 transition-all cursor-pointer ${
+                        dangerLevel === 'high'
+                          ? 'ring-2 ring-[#991B1B] shadow-xs'
+                          : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+                      }`}
+                      style={dangerLevel === 'high' ? {
+                        backgroundColor: DANGER_LEVEL_COLORS.high.fill,
+                        borderColor: '#991B1B',
+                        color: DANGER_LEVEL_COLORS.high.text
+                      } : undefined}
+                    >
+                      <span
+                        className="w-3 h-3 rounded-full shrink-0"
+                        style={{ backgroundColor: DANGER_LEVEL_COLORS.high.fill, border: '1.5px solid #991B1B' }}
+                      />
+                      <span>High</span>
+                    </button>
+                  </div>
+                  {!dangerLevel && (
+                    <p className="text-[10px] text-amber-700 mt-1 font-medium">
+                      Select Low or High danger level before saving.
+                    </p>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -1194,6 +1371,19 @@ export default function DangerZoneView({
               <option value="all_day">All Day</option>
             </select>
 
+            {/* Level filter */}
+            <select
+              value={filterDangerLevel}
+              onChange={(e) => setFilterDangerLevel(e.target.value)}
+              className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700"
+              aria-label="Filter by danger level"
+            >
+              <option value="all">All Levels</option>
+              <option value="low">Low</option>
+              <option value="high">High</option>
+              <option value="unset">Level not set</option>
+            </select>
+
             {/* Needs Location toggle */}
             <button
               type="button"
@@ -1209,6 +1399,68 @@ export default function DangerZoneView({
           </div>
         </div>
 
+        {/* Bulk Failure Report (if any row failed during batch write) */}
+        {bulkFailureReport && bulkFailureReport.length > 0 && (
+          <div className="p-3 bg-rose-50 border-b border-rose-200 text-xs text-rose-900 space-y-1.5">
+            <div className="flex items-center justify-between font-bold">
+              <span>Bulk Update Failure Report ({bulkFailureReport.length} failed):</span>
+              <button
+                type="button"
+                onClick={() => setBulkFailureReport(null)}
+                className="text-rose-700 hover:underline text-[11px]"
+              >
+                Dismiss
+              </button>
+            </div>
+            <div className="max-h-28 overflow-y-auto space-y-1">
+              {bulkFailureReport.map(f => (
+                <div key={f.id} className="bg-white border border-rose-200 rounded px-2.5 py-1 flex items-center justify-between gap-2 text-[11px]">
+                  <span className="font-semibold text-slate-800 truncate">{f.name} ({f.id})</span>
+                  <span className="font-mono text-rose-700">{f.reason}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Bulk Level Assignment Bar */}
+        {selectedZoneIds.length > 0 && onBulkSetDangerLevel && (
+          <div className="px-4 py-2.5 bg-slate-100 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center space-x-2">
+              <span className="font-bold text-slate-800">
+                {selectedZoneIds.length} zone{selectedZoneIds.length === 1 ? '' : 's'} selected
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedZoneIds([])}
+                className="text-[11px] text-slate-500 hover:text-slate-800 underline cursor-pointer"
+              >
+                Clear
+              </button>
+            </div>
+            <div className="flex items-center space-x-2">
+              <span className="text-[11px] font-semibold text-slate-600">Set level for selected zones:</span>
+              <select
+                value={bulkTargetLevel}
+                onChange={(e) => setBulkTargetLevel(e.target.value as DangerLevel)}
+                disabled={isBulkUpdating}
+                className="bg-white border border-slate-300 rounded px-2 py-1 text-xs font-semibold text-slate-800"
+              >
+                <option value="low">Low</option>
+                <option value="high">High</option>
+              </select>
+              <button
+                type="button"
+                disabled={isBulkUpdating}
+                onClick={handleBulkSetLevelPrompt}
+                className="px-3 py-1.5 bg-[#1E3A5F] hover:bg-[#132844] disabled:opacity-50 text-white rounded text-xs font-bold transition-colors cursor-pointer"
+              >
+                {isBulkUpdating ? 'Updating...' : 'Apply Level'}
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Table Body */}
         {filteredZones.length === 0 ? (
           <div className="p-12 text-center text-xs text-gray-400">
@@ -1220,7 +1472,17 @@ export default function DangerZoneView({
             <table className="w-full text-left border-collapse font-sans">
               <thead>
                 <tr className="bg-slate-100 border-b border-gray-200 text-slate-600 uppercase tracking-widest font-bold text-[9px]">
+                  <th className="py-3 pl-4 pr-2 w-8">
+                    <input
+                      type="checkbox"
+                      checked={allFilteredSelected}
+                      onChange={toggleSelectAllFiltered}
+                      title="Select all visible danger zones"
+                      className="rounded border-slate-300 text-[#1E3A5F] cursor-pointer"
+                    />
+                  </th>
                   <th className="py-3 px-4">Location Target</th>
+                  <th className="py-3 px-4">Level</th>
                   <th className="py-3 px-4">Category</th>
                   <th className="py-3 px-4">Crimes Recorded</th>
                   <th className="py-3 px-4">Active Schedule</th>
@@ -1236,21 +1498,36 @@ export default function DangerZoneView({
                   const isHighIncident = crimes >= HIGH_INCIDENT_THRESHOLD;
                   const zoneImg = getReportImage(zone);
                   const isNeedsLoc = zone.needsLocation === true;
+                  const isInactiveOrNeedsLoc = isNeedsLoc || zone.status === 'inactive';
                   const windowBadgeState = getZoneWindowBadgeState(zone, currentTime);
+                  const normLevel = normalizeDangerLevel(zone.dangerLevel);
+                  const levelColors = getDangerLevelColor(normLevel);
+                  const isChecked = selectedZoneIds.includes(zone.id);
 
                   return (
                     <tr key={zone.id} className={`hover:bg-slate-50/80 ${isNeedsLoc ? 'bg-amber-50/30' : ''}`}>
                       
+                      {/* Row Checkbox */}
+                      <td className="py-3 pl-4 pr-2">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleSelectZone(zone.id)}
+                          aria-label={`Select ${resolveLocationName(zone)}`}
+                          className="rounded border-slate-300 text-[#1E3A5F] cursor-pointer"
+                        />
+                      </td>
+
                       {/* Location Target */}
                       <td className="py-3 px-4">
                         <div className="font-bold text-slate-900 flex items-center space-x-2">
                           <span 
-                            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                              isNeedsLoc || zone.status === 'inactive'
-                                ? 'border border-dashed border-[#EA580C] bg-[#EA580C]/25 opacity-70'
-                                : 'bg-[#EA580C]'
-                            }`}
-                            title={isNeedsLoc ? 'Needs Location (Unmapped)' : zone.status === 'inactive' ? 'Inactive Zone' : 'Active Zone'}
+                            className={`w-2.5 h-2.5 rounded-full shrink-0 ${isInactiveOrNeedsLoc ? 'opacity-70' : ''}`}
+                            style={{
+                              backgroundColor: isInactiveOrNeedsLoc ? `${levelColors.fill}40` : levelColors.fill,
+                              border: `1.5px ${isInactiveOrNeedsLoc ? 'dashed' : 'solid'} ${levelColors.stroke}`
+                            }}
+                            title={`${levelColors.label}${isNeedsLoc ? ' • Needs Location' : zone.status === 'inactive' ? ' • Inactive Zone' : ' • Active Zone'}`}
                           />
                           <span>{resolveLocationName(zone)}</span>
                           {isNeedsLoc && (
@@ -1262,6 +1539,37 @@ export default function DangerZoneView({
                         <p className="text-[11px] text-gray-500 line-clamp-1 mt-0.5 ml-4.5">
                           {safeString(zone.description) || 'No safety remarks registered.'}
                         </p>
+                      </td>
+
+                      {/* Level Badge Column */}
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        {normLevel === 'low' ? (
+                          <span
+                            className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold"
+                            style={{
+                              backgroundColor: DANGER_LEVEL_COLORS.low.fill,
+                              border: `1px solid ${DANGER_LEVEL_COLORS.low.stroke}`,
+                              color: DANGER_LEVEL_COLORS.low.text
+                            }}
+                          >
+                            Low
+                          </span>
+                        ) : normLevel === 'high' ? (
+                          <span
+                            className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold"
+                            style={{
+                              backgroundColor: DANGER_LEVEL_COLORS.high.fill,
+                              border: '1px solid #991B1B',
+                              color: DANGER_LEVEL_COLORS.high.text
+                            }}
+                          >
+                            High
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-600 border border-slate-300">
+                            Level not set
+                          </span>
+                        )}
                       </td>
 
                       {/* Category */}
@@ -1276,8 +1584,8 @@ export default function DangerZoneView({
                             {crimes}
                           </span>
                           {isHighIncident && (
-                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-200 border border-neutral-700 font-bold uppercase tracking-wider">
-                              High Incident
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-300 font-semibold">
+                              {HIGH_INCIDENT_THRESHOLD}+ incidents
                             </span>
                           )}
                         </div>

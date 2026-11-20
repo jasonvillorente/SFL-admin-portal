@@ -18,8 +18,27 @@ export const PALANAN_BOUNDS: [[number, number], [number, number]] = [
   [STUDY_AREA_BOUNDS.maxLat, STUDY_AREA_BOUNDS.maxLng]  // Northeast (maxLat, maxLng)
 ];
 
-// Universal zone color: all zone circles, preview radius, and markers use single brand color
-export const ZONE_COLOR = '#EA580C';
+// Shared danger level color contract (low = yellow with dark amber outline, high = red, unset = neutral slate)
+export const DANGER_LEVEL_COLORS = {
+  low: {
+    fill: '#FACC15',
+    stroke: '#A16207',
+    text: '#422006',
+    label: 'Low'
+  },
+  high: {
+    fill: '#DC2626',
+    stroke: '#DC2626',
+    text: '#FFFFFF',
+    label: 'High'
+  },
+  unset: {
+    fill: '#64748B',
+    stroke: '#475569',
+    text: '#334155',
+    label: 'Level not set'
+  }
+} as const;
 
 // Shared operational threshold for High Incident classification
 export const HIGH_INCIDENT_THRESHOLD = 5;

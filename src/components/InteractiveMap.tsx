@@ -1,8 +1,9 @@
 import React, { useRef, useEffect } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { DangerZone, IncidentReport, getResidentName, formatPhoneNumber, resolveLocationName, safeString, isReportConvertedToZone } from '../types';
-import { PALANAN_CENTER, PALANAN_BOUNDS, HIGH_INCIDENT_THRESHOLD, ZONE_COLOR } from '../utils/zoneConstants';
+import { DangerZone, DangerLevel, IncidentReport, getResidentName, formatPhoneNumber, resolveLocationName, safeString, isReportConvertedToZone } from '../types';
+import { PALANAN_CENTER, PALANAN_BOUNDS, HIGH_INCIDENT_THRESHOLD, DANGER_LEVEL_COLORS } from '../utils/zoneConstants';
+import { getDangerLevelColor, normalizeDangerLevel } from '../utils/zoneUtils';
 import { Compass } from 'lucide-react';
 
 interface InteractiveMapProps {
@@ -19,18 +20,8 @@ interface InteractiveMapProps {
   createLat?: number | null;
   createLng?: number | null;
   createRadius?: number;
-  createColor?: string;
+  createDangerLevel?: DangerLevel | '';
 }
-
-// Fallback color configurations for backwards compatibility
-const MAP_RISK_COLORS: Record<string, string> = {
-  Low: '#10B981',
-  Moderate: '#F59E0B',
-  High: '#F97316',
-  Critical: '#EF4444',
-  LOW: '#10B981',
-  MEDIUM: '#F97316',
-};
 
 export default function InteractiveMap({
   dangerZones,
@@ -45,7 +36,7 @@ export default function InteractiveMap({
   createLat = null,
   createLng = null,
   createRadius = 100,
-  createColor = '#EF4444'
+  createDangerLevel = ''
 }: InteractiveMapProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<L.Map | null>(null);
@@ -166,15 +157,15 @@ export default function InteractiveMap({
 
       creationMarkerRef.current = marker;
 
-      // Create the live preview circle around it with single shared ZONE_COLOR
-      const circleHexColor = ZONE_COLOR;
+      // Create the live preview circle around it using the selected danger level color (or neutral slate if unset)
+      const previewColors = getDangerLevelColor(createDangerLevel);
       const circle = L.circle([lat, lng], {
         radius: Number(createRadius) || 100,
-        color: circleHexColor,
-        fillColor: circleHexColor,
+        color: previewColors.stroke,
+        fillColor: previewColors.fill,
         weight: 3,
-        opacity: 0.85,
-        fillOpacity: 0.22,
+        opacity: 0.9,
+        fillOpacity: 0.28,
         dashArray: '5, 5'
       }).addTo(map);
 
@@ -183,7 +174,7 @@ export default function InteractiveMap({
       // Pan & center map view directly to the exact pinpoint coordinates
       map.setView([lat, lng], Math.max(map.getZoom(), 17), { animate: true });
     }
-  }, [isCreating, createLat, createLng, createRadius, createColor, onMarkerDrag]);
+  }, [isCreating, createLat, createLng, createRadius, createDangerLevel, onMarkerDrag]);
 
   // 3. Reactively populate Danger Circle Zones & optional report pinpoints
   useEffect(() => {
@@ -198,11 +189,11 @@ export default function InteractiveMap({
     reportsGroup.clearLayers();
 
     // A. Filter danger zones according to category classifying preferences
-    const activeZones = selectedCategory === 'all'
-      ? dangerZones.filter(z => z.status === 'active')
-      : dangerZones.filter(z => z.status === 'active' && z.category === selectedCategory);
+    const zonesToDraw = selectedCategory === 'all'
+      ? dangerZones
+      : dangerZones.filter(z => z.category === selectedCategory);
 
-    activeZones.forEach(zone => {
+    zonesToDraw.forEach(zone => {
       if (zone.needsLocation || !isValidCoord(zone.latitude, zone.longitude)) {
         return;
       }
@@ -211,21 +202,22 @@ export default function InteractiveMap({
       const lng = Number(zone.longitude);
       const isSelected = selectedMarker?.type === 'zone' && selectedMarker?.id === zone.id;
       const isInactive = zone.status === 'inactive' || zone.needsLocation === true;
-      const isHighIncident = (zone.crimeCount ?? 0) >= HIGH_INCIDENT_THRESHOLD;
+      const totalCrimes = zone.crimeCount ?? ((zone.nightCrimeCount ?? 0) + (zone.dayCrimeCount ?? 0));
+      const isHighIncident = totalCrimes >= HIGH_INCIDENT_THRESHOLD;
 
-      // Universal single color ZONE_COLOR = '#EA580C' used by all zone circles
-      const hexColor = ZONE_COLOR;
+      const normLevel = normalizeDangerLevel(zone.dangerLevel);
+      const levelColors = getDangerLevelColor(normLevel);
       const radiusMeters = Number(zone.radius) || 100;
 
-      // Inactive & needsLocation zones use the same color, dashed and lighter
+      // Inactive & needsLocation zones keep the same level color, dashed and lighter
       const circle = L.circle([lat, lng], {
         radius: radiusMeters,
-        color: hexColor,
-        fillColor: hexColor,
+        color: levelColors.stroke,
+        fillColor: levelColors.fill,
         dashArray: isInactive ? '6, 6' : undefined,
-        weight: isSelected ? 4 : (isInactive ? 1.5 : 2),
-        opacity: isInactive ? 0.5 : (isSelected ? 0.95 : 0.85),
-        fillOpacity: isInactive ? 0.08 : 0.22
+        weight: isSelected ? 4 : (isInactive ? 2 : 2.5),
+        opacity: isInactive ? 0.5 : (isSelected ? 0.95 : 0.9),
+        fillOpacity: isInactive ? 0.08 : 0.28
       });
 
       // Click listener reports target node selection back to parent
@@ -236,7 +228,6 @@ export default function InteractiveMap({
         }
       });
 
-      const dateString = zone.createdAt ? new Date(zone.createdAt).toLocaleDateString() : 'N/A';
       const resolvedLocName = resolveLocationName(zone);
       const activeTimeText = zone.activeTime === 'night_only' 
         ? `Night Only (${zone.startHour ?? 18}:00 - ${zone.endHour ?? 5}:00)`
@@ -249,14 +240,21 @@ export default function InteractiveMap({
         ? 'Resident Report'
         : 'Both (Verified)';
 
-      const totalCrimes = zone.crimeCount ?? ((zone.nightCrimeCount ?? 0) + (zone.dayCrimeCount ?? 0));
+      const levelBadgeHtml = normLevel === 'low'
+        ? `<span style="background-color: ${DANGER_LEVEL_COLORS.low.fill}; border: 1px solid ${DANGER_LEVEL_COLORS.low.stroke}; color: ${DANGER_LEVEL_COLORS.low.text};" class="text-[9px] px-1.5 py-0.5 rounded font-bold shrink-0">Low</span>`
+        : normLevel === 'high'
+        ? `<span style="background-color: ${DANGER_LEVEL_COLORS.high.fill}; border: 1px solid #991B1B; color: ${DANGER_LEVEL_COLORS.high.text};" class="text-[9px] px-1.5 py-0.5 rounded font-bold shrink-0">High</span>`
+        : `<span class="text-[9px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-300 font-semibold shrink-0">Level not set</span>`;
+
+      circle.bindTooltip(`${resolvedLocName} (${levelColors.label})`, { sticky: true });
 
       const popupHtml = `
         <div class="p-2.5 max-w-xs text-xs font-sans" id="popup-zone-${zone.id}">
-          <div class="flex items-center space-x-1.5 font-bold border-b border-gray-100 pb-1.5 mb-1.5">
-            <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: ${hexColor}"></span>
+          <div class="flex items-center flex-wrap gap-1.5 font-bold border-b border-gray-100 pb-1.5 mb-1.5">
+            <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: ${levelColors.fill}; border: 1.5px solid ${levelColors.stroke};"></span>
             <h4 class="font-bold text-slate-900 text-xs leading-snug">${resolvedLocName}</h4>
-            ${isHighIncident ? '<span class="ml-auto text-[9px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-200 border border-neutral-700 font-bold uppercase tracking-wider">High Incident</span>' : ''}
+            ${levelBadgeHtml}
+            ${isHighIncident ? '<span class="ml-auto text-[9px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-300 font-semibold">5+ incidents</span>' : ''}
           </div>
           <table class="w-full text-left font-sans text-[11px] space-y-0.5">
             <tr>
@@ -417,23 +415,34 @@ export default function InteractiveMap({
         <div ref={mapContainerRef} className="absolute inset-0 z-10 w-full h-full" id="circle-map-box" />
 
         {/* Floating Minimalist Legend */}
-        <div className="absolute bottom-3 right-3 z-20 bg-white/95 border border-gray-200 p-2.5 rounded shadow-md text-[9px] font-sans flex flex-col space-y-1.5 pointer-events-auto w-36 backdrop-blur-xs">
-          <h4 className="font-bold text-slate-800 border-b pb-1 text-[8px] tracking-wider uppercase">Circles Legend</h4>
+        <div className="absolute bottom-3 right-3 z-20 bg-white/95 border border-gray-200 p-2.5 rounded shadow-md text-[9px] font-sans flex flex-col space-y-1.5 pointer-events-auto w-40 backdrop-blur-xs">
+          <h4 className="font-bold text-slate-800 border-b pb-1 text-[8px] tracking-wider uppercase">Zone Level Legend</h4>
           <div className="flex items-center space-x-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#10B981] opacity-70 block shrink-0" />
-            <span className="text-slate-700 font-medium text-[9px]">Low Risk (50m)</span>
+            <span
+              className="w-2.5 h-2.5 rounded-full block shrink-0"
+              style={{ backgroundColor: DANGER_LEVEL_COLORS.low.fill, border: `1.5px solid ${DANGER_LEVEL_COLORS.low.stroke}` }}
+            />
+            <span className="text-slate-700 font-medium text-[9px]">Low level</span>
           </div>
           <div className="flex items-center space-x-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#F59E0B] opacity-70 block shrink-0" />
-            <span className="text-slate-700 font-medium text-[9px]">Moderate (100m)</span>
+            <span
+              className="w-2.5 h-2.5 rounded-full block shrink-0"
+              style={{ backgroundColor: DANGER_LEVEL_COLORS.high.fill, border: `1.5px solid ${DANGER_LEVEL_COLORS.high.stroke}` }}
+            />
+            <span className="text-slate-700 font-medium text-[9px]">High level</span>
           </div>
           <div className="flex items-center space-x-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#F97316] opacity-70 block shrink-0" />
-            <span className="text-slate-700 font-medium text-[9px]">High Risk (150m)</span>
+            <span
+              className="w-2.5 h-2.5 rounded-full block shrink-0"
+              style={{ backgroundColor: DANGER_LEVEL_COLORS.unset.fill, border: `1.5px solid ${DANGER_LEVEL_COLORS.unset.stroke}` }}
+            />
+            <span className="text-slate-600 font-medium text-[9px]">Level not set</span>
           </div>
-          <div className="flex items-center space-x-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#EF4444] opacity-70 block shrink-0" />
-            <span className="text-slate-700 font-medium text-[9px]">Critical (200m)</span>
+          <div className="flex items-center space-x-1.5 pt-0.5 border-t border-gray-100">
+            <span
+              className="w-2.5 h-2.5 rounded-full block shrink-0 border-2 border-dashed border-slate-500 bg-slate-200/60"
+            />
+            <span className="text-slate-600 font-medium text-[9px]">Inactive right now</span>
           </div>
         </div>
       </div>

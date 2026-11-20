@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { DangerZone, IncidentReport, UserAccount, getResidentName, formatPhoneNumber, getReportImage, resolveLocationName, safeString, isReportConvertedToZone } from '../types';
 import InteractiveMap from './InteractiveMap';
 import { Filter, Search, AlertTriangle, ShieldAlert, Layers, MapPin, Eye, Compass, RefreshCw, Phone, Camera } from 'lucide-react';
-import { hasValidCoordinates } from '../utils/zoneUtils';
+import { hasValidCoordinates, getDangerLevelColor, normalizeDangerLevel } from '../utils/zoneUtils';
+import { DANGER_LEVEL_COLORS } from '../utils/zoneConstants';
 
 interface MapMonitoringViewProps {
   dangerZones: DangerZone[];
@@ -149,6 +150,8 @@ export default function MapMonitoringView({
                 filteredZones.map(zone => {
                   const isSelected = selectedMarker?.type === 'zone' && selectedMarker?.id === zone.id;
                   const zoneImg = getReportImage(zone);
+                  const normLevel = normalizeDangerLevel(zone.dangerLevel);
+                  const levelColors = getDangerLevelColor(normLevel);
 
                   return (
                     <button
@@ -156,26 +159,50 @@ export default function MapMonitoringView({
                       onClick={() => onSelectMarker({ type: 'zone', id: zone.id })}
                       className={`w-full text-left p-2.5 rounded border transition-all flex items-start space-x-2.5 text-xs cursor-pointer ${
                         isSelected 
-                          ? 'bg-red-50 border-red-300 ring-1 ring-red-300' 
+                          ? 'bg-slate-100 border-[#1E3A5F] ring-1 ring-[#1E3A5F]' 
                           : 'bg-slate-50 border-gray-200 hover:bg-slate-100'
                       }`}
                     >
                       {zoneImg ? (
-                        <div className="w-9 h-9 rounded overflow-hidden border border-red-200 shrink-0 bg-slate-200">
+                        <div className="w-9 h-9 rounded overflow-hidden border border-slate-200 shrink-0 bg-slate-200">
                           <img src={zoneImg} alt="Hazard" className="w-full h-full object-cover" onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }} />
                         </div>
                       ) : (
-                        <AlertTriangle className="w-4 h-4 text-red-600 mt-0.5 shrink-0" />
+                        <span
+                          className="w-3.5 h-3.5 rounded-full mt-0.5 shrink-0"
+                          style={{ backgroundColor: levelColors.fill, border: `1.5px solid ${levelColors.stroke}` }}
+                        />
                       )}
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-1.5">
                           <span className="font-bold text-slate-900 truncate pr-2">{resolveLocationName(zone)}</span>
-                          <span className={`text-[9px] font-bold px-1 rounded uppercase shrink-0 ${
-                            zone.riskLevel === 'Critical' ? 'bg-red-100 text-red-800' :
-                            zone.riskLevel === 'High' ? 'bg-orange-100 text-orange-850' : 'bg-blue-100 text-blue-800'
-                          }`}>
-                            {zone.riskLevel}
-                          </span>
+                          {normLevel === 'low' ? (
+                            <span
+                              className="text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0"
+                              style={{
+                                backgroundColor: DANGER_LEVEL_COLORS.low.fill,
+                                border: `1px solid ${DANGER_LEVEL_COLORS.low.stroke}`,
+                                color: DANGER_LEVEL_COLORS.low.text
+                              }}
+                            >
+                              Low
+                            </span>
+                          ) : normLevel === 'high' ? (
+                            <span
+                              className="text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0"
+                              style={{
+                                backgroundColor: DANGER_LEVEL_COLORS.high.fill,
+                                border: '1px solid #991B1B',
+                                color: DANGER_LEVEL_COLORS.high.text
+                              }}
+                            >
+                              High
+                            </span>
+                          ) : (
+                            <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded shrink-0 bg-slate-100 text-slate-600 border border-slate-300">
+                              Level not set
+                            </span>
+                          )}
                         </div>
                         <p className="text-[11px] text-gray-500 truncate mt-0.5">{safeString(zone.description) || 'No notes provided'}</p>
                         <div className="flex items-center justify-between text-[10px] text-gray-400 mt-1 font-mono">

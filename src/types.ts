@@ -24,6 +24,8 @@ export interface UserAccount {
   authType?: 'phone' | 'email' | 'google' | string;
 }
 
+export type DangerLevel = 'low' | 'high';
+
 export interface DangerZone {
   id: string; // Document ID
   zoneId: string;
@@ -31,6 +33,7 @@ export interface DangerZone {
   reportId?: string;
   locationName: string;
   category: 'Crime' | 'Poor Lighting' | 'Flood Risk' | 'Accident-Prone Area' | 'Construction Area' | 'Suspicious Activity' | 'Crime Area' | 'Theft Area' | 'Robbery Area' | 'Assault Area' | 'Accident Prone Area' | 'Road Hazard' | 'Flood Prone Area' | 'Fire Incident Area' | 'Other' | string;
+  dangerLevel?: DangerLevel; // Two-level classification: "low" | "high" (lowercase); optional for legacy documents
   riskLevel?: 'Low' | 'Moderate' | 'High' | 'Critical' | 'LOW' | 'MEDIUM' | 'HIGH' | string; // Legacy field, kept optional to parse old documents without errors
   description: string;
   latitude?: number;

@@ -33,6 +33,7 @@ import {
 import { 
   UserAccount, 
   DangerZone, 
+  DangerLevel,
   IncidentReport, 
   CommunityAlert, 
   ActivityLog, 
@@ -47,7 +48,14 @@ import {
   extractCoordinates,
   isReportConvertedToZone
 } from './types';
-import { sanitizeFirestorePayload, deduplicateDangerZones } from './utils/zoneUtils';
+import {
+  sanitizeFirestorePayload,
+  deduplicateDangerZones,
+  normalizeDangerLevel,
+  validateDangerLevelRequired,
+  buildQuickConvertDangerZonePayload
+} from './utils/zoneUtils';
+import { MAX_BATCH_SIZE } from './utils/zoneConstants';
 
 // Views
 import Login from './components/Login';
@@ -317,8 +325,9 @@ export default function App() {
 
           const finalLat = isNeedsLoc ? undefined : Number(rawLat);
           const finalLng = isNeedsLoc ? undefined : Number(rawLng);
+          const normDangerLevel = normalizeDangerLevel(data.dangerLevel);
 
-          colZones.push({ 
+          const zoneObj: DangerZone = { 
             id: doc.id, 
             ...data,
             needsLocation: isNeedsLoc,
@@ -334,7 +343,15 @@ export default function App() {
             locationName: locName,
             description: desc,
             createdAt: data.createdAt ? safeFormatDate(data.createdAt) : undefined
-          } as DangerZone);
+          } as DangerZone;
+
+          if (normDangerLevel) {
+            zoneObj.dangerLevel = normDangerLevel;
+          } else {
+            delete zoneObj.dangerLevel;
+          }
+
+          colZones.push(zoneObj);
         });
         zoneSnapshotStates[colName] = colZones;
         setDbSyncStatus(prev => ({
@@ -817,6 +834,106 @@ export default function App() {
     );
   };
 
+  const handleBulkSetDangerLevel = async (
+    ids: string[],
+    level: DangerLevel
+  ): Promise<{ updatedCount: number; failedCount: number; failedItems: Array<{ id: string; name: string; reason: string }> }> => {
+    const uniqueIds = Array.from(new Set(ids)).filter(Boolean);
+    if (uniqueIds.length === 0) {
+      return { updatedCount: 0, failedCount: 0, failedItems: [] };
+    }
+
+    const updatedAt = new Date().toISOString();
+    const patch = {
+      dangerLevel: level,
+      updatedAt
+    };
+
+    const collectionsToCheck = ['danger_zones', 'dangerZones', 'hazards'];
+    const zoneById = new Map(dangerZones.map(z => [z.id, z]));
+
+    // Resolve existing document refs per zone ID so batched writes stay within MAX_BATCH_SIZE (500)
+    const operations: Array<{ id: string; name: string; colName: string; ref: any }> = [];
+    for (const id of uniqueIds) {
+      const zone = zoneById.get(id);
+      const name = zone ? resolveLocationName(zone, id) : id;
+      let foundAny = false;
+      for (const colName of collectionsToCheck) {
+        try {
+          const ref = doc(db, colName, id);
+          const snap = await getDoc(ref);
+          if (snap.exists()) {
+            operations.push({ id, name, colName, ref });
+            foundAny = true;
+          }
+        } catch (err) {
+          console.warn(`Lookup skipped for ${colName}/${id}:`, err);
+        }
+      }
+      if (!foundAny) {
+        // Fallback to primary danger_zones ref if lookup failed or doc is only in primary
+        operations.push({ id, name, colName: 'danger_zones', ref: doc(db, 'danger_zones', id) });
+      }
+    }
+
+    const succeededZoneIds = new Set<string>();
+    const failedByZoneId = new Map<string, { id: string; name: string; reason: string }>();
+
+    for (let i = 0; i < operations.length; i += MAX_BATCH_SIZE) {
+      const chunk = operations.slice(i, i + MAX_BATCH_SIZE);
+      try {
+        const batch = writeBatch(db);
+        for (const op of chunk) {
+          batch.update(op.ref, patch);
+        }
+        await batch.commit();
+        for (const op of chunk) {
+          succeededZoneIds.add(op.id);
+        }
+      } catch (batchErr: any) {
+        console.warn('Bulk level batch commit failed, falling back per operation:', batchErr);
+        for (const op of chunk) {
+          try {
+            await updateDoc(op.ref, patch);
+            succeededZoneIds.add(op.id);
+          } catch (rowErr: any) {
+            const reason = rowErr?.message || String(rowErr);
+            failedByZoneId.set(op.id, { id: op.id, name: op.name, reason });
+          }
+        }
+      }
+    }
+
+    // Any zone that had a failure in any target doc should be treated carefully; exclude failed IDs from succeeded set
+    for (const failedId of failedByZoneId.keys()) {
+      succeededZoneIds.delete(failedId);
+    }
+
+    if (succeededZoneIds.size > 0) {
+      setDangerZones(prev =>
+        prev.map(z => (succeededZoneIds.has(z.id) ? { ...z, dangerLevel: level, updatedAt } : z))
+      );
+    }
+
+    const updatedCount = succeededZoneIds.size;
+    const failedItems = Array.from(failedByZoneId.values());
+    const failedCount = failedItems.length;
+
+    const opEmail = (operatorSession?.email || '').trim();
+    if (!opEmail) {
+      console.warn('Skipping activity log for bulk danger level update: operator email is blank.');
+    } else {
+      await logActivity(
+        operatorSession?.name || 'System Admin',
+        opEmail,
+        'Danger Zone Level Bulk Updated',
+        `Bulk-set dangerLevel="${level}" for ${updatedCount} danger zone(s)${failedCount > 0 ? ` (${failedCount} failed)` : ''}.`
+      );
+    }
+
+    return { updatedCount, failedCount, failedItems };
+  };
+
   const handleBatchImportDangerZones = async (
     toAdd: Omit<DangerZone, 'id'>[],
     toUpdate: { id: string; changes: Partial<DangerZone> }[],
@@ -1177,39 +1294,25 @@ export default function App() {
     setCurrentView('danger');
   };
 
-  const handleQuickConvertToDangerZone = async (report: IncidentReport, radius: number = 150) => {
+  const handleQuickConvertToDangerZone = async (
+    report: IncidentReport,
+    dangerLevel: DangerLevel,
+    radius: number = 150
+  ) => {
     if (!operatorSession) return;
-    const ref = doc(collection(db, 'danger_zones'));
-    const img = getReportImage(report);
-    const completePayload: DangerZone = sanitizeFirestorePayload({
-      id: ref.id,
-      zoneId: ref.id,
-      sourceReportId: report.id,
-      reportId: report.id,
-      locationName: report.locationName || 'Incident Hazard Area',
-      latitude: Number(report.latitude),
-      longitude: Number(report.longitude),
-      category: report.category || 'Crime',
-      description: report.description || 'Converted from citizen incident report.',
-      radius: Number(radius) || 150,
-      source: 'resident_report',
-      activeTime: 'all_day',
-      startHour: 0,
-      endHour: 24,
-      nightCrimeCount: 0,
-      dayCrimeCount: 0,
-      crimeCount: 0,
-      crimeTypes: {},
-      imageUrl: img || undefined,
-      photoUrl: img || undefined,
-      photos: img ? [img] : [],
-      createdAt: new Date().toISOString(),
-      createdBy: operatorSession.email,
-      addedBy: operatorSession.email,
-      status: 'active',
-      active: true
-    });
+    const levelCheck = validateDangerLevelRequired(dangerLevel);
+    if ('error' in levelCheck) {
+      throw new Error(levelCheck.error);
+    }
 
+    const ref = doc(collection(db, 'danger_zones'));
+    const completePayload = buildQuickConvertDangerZonePayload(
+      report,
+      ref.id,
+      levelCheck.level,
+      operatorSession.email,
+      radius
+    );
 
     try {
       await setDoc(ref, completePayload);
@@ -1228,7 +1331,7 @@ export default function App() {
       operatorSession.name,
       operatorSession.email,
       'Incident Converted to Danger Zone',
-      `Converted citizen report "${report.locationName}" to active Danger Zone ID ${ref.id}.`
+      `Converted citizen report "${report.locationName}" to active ${levelCheck.level} Danger Zone ID ${ref.id}.`
     );
   };
 
@@ -1536,6 +1639,7 @@ export default function App() {
             onAddDangerZone={handleAddDangerZone}
             onUpdateDangerZone={handleUpdateDangerZone}
             onDeleteDangerZone={handleDeleteDangerZone}
+            onBulkSetDangerLevel={handleBulkSetDangerLevel}
             onBatchImport={handleBatchImportDangerZones}
             onUndoBatchImport={handleUndoBatchImport}
           />
